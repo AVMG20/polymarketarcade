@@ -32,6 +32,8 @@ export interface HubManifestGame {
 }
 
 export interface HubManifest {
+    /** Where the app's code lives; the hub links it from the game pages. */
+    repoUrl?: string | null
     games: HubManifestGame[]
 }
 
