@@ -14,6 +14,7 @@
         "@fontsource/patrick-hand": "^5.3.0",
         "@fontsource/patrick-hand-sc": "^5.3.0",
         "@fontsource/pirata-one": "^5.3.0",
+        "@fontsource/rajdhani": "^5.3.0",
         "@nuxtjs/color-mode": "^4.1.0",
         "@tailwindcss/vite": "^4.3.5",
         "@vueuse/core": "^15.0.0",
@@ -203,6 +204,8 @@
     "@fontsource/patrick-hand-sc": ["@fontsource/patrick-hand-sc@5.3.0", "", {}, "sha512-aOTz6DMfmqH88dR1oKtsJWoA6MoY5P6F/Bt7AFxgCsG9LzitbcosVuPYq/lzLdhulAtzci9TRAM6nztaLyWQsQ=="],
 
     "@fontsource/pirata-one": ["@fontsource/pirata-one@5.3.0", "", {}, "sha512-qeaDy+F+TcCVdODaIvD4U0ZoaWPejpkXwHAAHIBtauwP/9mf+Sj8ORX5UYcnBpnyhd7ihYPpW+WWPbz9FryrJQ=="],
+
+    "@fontsource/rajdhani": ["@fontsource/rajdhani@5.3.0", "", {}, "sha512-oBJgSIibWJvVBKseme1JczqPLoDHN97LHti4uh0LjfcJqQoVmnQQlRKIpEjTJV559rmVQ6qbVZZwKwk2wkBTtw=="],
 
     "@internationalized/date": ["@internationalized/date@3.12.4", "", { "dependencies": { "@swc/helpers": "^0.5.0" } }, "sha512-M1dEn4c1U1HsSlaVR8upZtSqvXrTkHDfv18H01uCSJyjVLDxnBR38v/fMxecmlwXKR4i9HeZcmgQAPE6A+aGJQ=="],
 

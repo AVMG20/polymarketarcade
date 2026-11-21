@@ -1,0 +1,73 @@
+CREATE TABLE `void_items` (
+	`id` text PRIMARY KEY NOT NULL,
+	`player_id` text NOT NULL,
+	`kind` text NOT NULL,
+	`type` text NOT NULL,
+	`tier` integer DEFAULT 1 NOT NULL,
+	`rarity` integer DEFAULT 0 NOT NULL,
+	`level` integer DEFAULT 0 NOT NULL,
+	`affixes` text DEFAULT '{}' NOT NULL,
+	`mod` text,
+	`created_at` integer DEFAULT (unixepoch('subsec') * 1000) NOT NULL,
+	FOREIGN KEY (`player_id`) REFERENCES `players`(`id`) ON UPDATE no action ON DELETE cascade
+);
+--> statement-breakpoint
+CREATE INDEX `void_items_player_idx` ON `void_items` (`player_id`);--> statement-breakpoint
+CREATE TABLE `void_run_history` (
+	`id` text PRIMARY KEY NOT NULL,
+	`player_id` text NOT NULL,
+	`sector` integer DEFAULT 1 NOT NULL,
+	`ship_id` text DEFAULT 'sparrow' NOT NULL,
+	`duration_ms` integer DEFAULT 0 NOT NULL,
+	`haul` text DEFAULT '{}' NOT NULL,
+	`haul_value` integer DEFAULT 0 NOT NULL,
+	`extracted` integer DEFAULT false NOT NULL,
+	`reason` text NOT NULL,
+	`kills` integer DEFAULT 0 NOT NULL,
+	`warden_killed` integer DEFAULT false NOT NULL,
+	`meta` text,
+	`created_at` integer DEFAULT (unixepoch('subsec') * 1000) NOT NULL,
+	FOREIGN KEY (`player_id`) REFERENCES `players`(`id`) ON UPDATE no action ON DELETE cascade
+);
+--> statement-breakpoint
+CREATE INDEX `void_run_history_player_idx` ON `void_run_history` (`player_id`,`created_at`);--> statement-breakpoint
+CREATE TABLE `void_state` (
+	`player_id` text PRIMARY KEY NOT NULL,
+	`resources` text DEFAULT '{}' NOT NULL,
+	`owned_ship_ids` text DEFAULT '["sparrow"]' NOT NULL,
+	`equipped_ship_id` text DEFAULT 'sparrow' NOT NULL,
+	`ship_tiers` text DEFAULT '{}' NOT NULL,
+	`loadouts` text DEFAULT '{}' NOT NULL,
+	`mods` text DEFAULT '{}' NOT NULL,
+	`starter_granted` integer DEFAULT false NOT NULL,
+	`rewards_day` text,
+	`marks_today` integer DEFAULT 0 NOT NULL,
+	`blueprints_today` integer DEFAULT 0 NOT NULL,
+	`gear_today` integer DEFAULT 0 NOT NULL,
+	`relics_today` integer DEFAULT 0 NOT NULL,
+	`marks` integer DEFAULT 0 NOT NULL,
+	`perks` text DEFAULT '{}' NOT NULL,
+	`blueprints` text DEFAULT '[]' NOT NULL,
+	`lore` text DEFAULT '[]' NOT NULL,
+	`beacons` text DEFAULT '{}' NOT NULL,
+	`upgrade_levels` text DEFAULT '{}' NOT NULL,
+	`highest_sector_cleared` integer DEFAULT 0 NOT NULL,
+	`runs_played` integer DEFAULT 0 NOT NULL,
+	`extractions` integer DEFAULT 0 NOT NULL,
+	`kills` integer DEFAULT 0 NOT NULL,
+	`wardens_killed` integer DEFAULT 0 NOT NULL,
+	`best_haul_value` integer DEFAULT 0 NOT NULL,
+	`run_started_at` integer,
+	`run_sector` integer,
+	`run_ship_id` text,
+	`run_cargo` integer,
+	`pilot_xp` integer DEFAULT 0 NOT NULL,
+	`supplies` text DEFAULT '{}' NOT NULL,
+	`run_supplies` text,
+	`contracts_day` text,
+	`contracts_done` text DEFAULT '[]' NOT NULL,
+	`unlocked_skills` text DEFAULT '["seeker"]' NOT NULL,
+	`equipped_skill` text DEFAULT 'seeker' NOT NULL,
+	`skill_nodes` text DEFAULT '{}' NOT NULL,
+	FOREIGN KEY (`player_id`) REFERENCES `players`(`id`) ON UPDATE no action ON DELETE cascade
+);

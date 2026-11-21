@@ -63,13 +63,13 @@ const ALL_GAMES: ArcadeGame[] = [
         slug: 'void-runner',
         name: 'Void Runner',
         tagline: 'Third-person space shooter',
-        description: 'Crack ore, fight wardens and build a dreadnought. Salvage from each run upgrades your hangar.',
+        description: 'Crack ore, fight wardens and build a dreadnought. Everything in the hangar is built from what you fly home.',
         path: '/void',
         icon: 'lucide:rocket',
         cover: '/images/games/void.jpg',
         accent: '#6a5cff',
         multiplayer: false,
-        ready: false
+        ready: true
     }
 ]
 
