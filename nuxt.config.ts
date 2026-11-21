@@ -49,7 +49,7 @@ export default defineNuxtConfig({
         typescript: {
             tsConfig: {
                 include: ['../test/**/*', '../scripts/**/*'],
-                compilerOptions: { types: ['bun'], lib: ['ESNext', 'DOM', 'DOM.Iterable'] }
+                compilerOptions: { types: ['bun'], lib: ['ESNext', 'DOM', 'DOM.Iterable', 'DOM.AsyncIterable'] }
             }
         }
     },

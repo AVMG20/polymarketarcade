@@ -15,6 +15,13 @@
       "when": 1795282924990,
       "tag": "0001_dead-front",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1795285647374,
+      "tag": "0002_shapezz",
+      "breakpoints": true
     }
   ]
 }

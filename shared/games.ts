@@ -45,7 +45,7 @@ const ALL_GAMES: ArcadeGame[] = [
         cover: '/images/games/shapezz.jpg',
         accent: '#e04fd0',
         multiplayer: false,
-        ready: false
+        ready: true
     },
     {
         slug: 'pirate-raid',
