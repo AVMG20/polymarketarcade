@@ -46,8 +46,24 @@ the dev server to Node (bun:sqlite would not load).
 - `app/`: `composables/useArcadeSession.ts`, `useHubBridge.ts`; `components/arcade/` (shell and lobby);
   `components/<game>/`, `utils/<game>/` and `pages/<game path>` per game. Game pages use
   `definePageMeta({ layout: 'game' })`: the slim bar, then the game filling the viewport.
-- `public/<game>/`: each game's models, music and images.
+- `public/assets/<game>/`: each game's models and music; `public/images/games/` the lobby covers.
 - `scripts/`: `migrate.ts` and per-game balance, bench and playtest scripts (`bun scripts/<name>.ts`).
+
+## Games
+
+| Game | Page | Currency (curves) | Server | Notes |
+|---|---|---|---|---|
+| Dead Front | `/dead-front` | medals, per match from the server sim's own result (`shared/dead-front/progression.ts`) | `server/api/dead-front/ws.ts`, `server/utils/dead-front/` | Co-op over one WebSocket per tab; the sim is authoritative; `dead_front_results` (match, player) applies a result once |
+| SHAPEZZ | `/shapezz`, `/shapezz/workshop` | shards, banked at 45 s checkpoints (`shared/shapezz/economy.ts`) | `server/utils/shapezz.ts` | `start-run` issues a run id; `finish-run` settles it once and caps loot by the server clock |
+| Pirate Raid | `/pirates`, `/pirates/manage`, `/history`, `/leaderboard` | doubloons, paid by time afloat × sea (`shared/pirate-raid/economy.ts`) | `server/utils/pirate-raid.ts` | Pay comes from the server clock and the difficulty snapshotted at start |
+| Void Runner | `/void` | the materials you fly home (`shared/void-runner/economy.ts`) | `server/utils/void-runner.ts` | Hauls are capped by sector, hold and minutes flown; cores by accepted boss kills |
+
+Each game has `scripts/<game>-economy.ts`, a sim that prints runs-to-afford per upgrade tier. Tune the curves
+in the shared config and rerun it; values stay plain integers from 1 to a few thousand. Dead Front's scripts
+run with `bun --tsconfig-override scripts/tsconfig.bun.json scripts/<name>.ts`.
+
+Static assets live under `public/assets/<game>/`, never `public/<game page>/`: a folder with the same name as a
+page makes the static server redirect `/dead-front` to `/dead-front/`.
 
 ## Platform
 
