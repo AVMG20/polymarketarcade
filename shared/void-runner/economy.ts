@@ -24,31 +24,52 @@ export const VOID_QTY = 0.2
 /** Price multipliers per kind of purchase, on top of VOID_QTY. Tuned with the economy sim. */
 export const VOID_COST_MULT = {
     /** Station systems (engines, cargo, mining, drones). */
-    system: 1.6,
-    /** New hulls. */
-    ship: 0.55,
+    system: 1.2,
+    /** New hulls (the catalogue in void.ts). */
+    ship: 0.3,
     /** Lifting a hull a tier. */
-    refit: 0.55,
-    /** Crafting gear. */
-    craft: 1.4,
-    /** Levelling gear +1 … +10. */
-    level: 2.4,
+    refit: 0.2,
+    /** Crafting gear: cheap enough to craft again for a better roll. */
+    craft: 1,
+    /** Levelling gear +1 … +10: where the gear sink lives. */
+    level: 1.4,
     /** Unlocking a pilot skill. */
     skill: 1.5,
     /** One supply (nanites, shield cell, EMP). */
-    supply: 1,
+    supply: 1.5,
     /** What a daily contract asks for. */
     contract: 1
 } as const
 
 export type VoidCostKind = keyof typeof VOID_COST_MULT
 
-/**
- * Per-level growth of the station systems and gear levels. The early steps
- * cost about a run, the last ones a long evening.
- */
+/** Per-level growth of the station systems and of gear levels. */
 export const VOID_SYSTEM_GROWTH = 1.55
-export const VOID_LEVEL_GROWTH = 1.36
+export const VOID_LEVEL_GROWTH = 1.28
+
+/**
+ * Station system recipes by level band (authored units): the first levels
+ * cost what sector 1 drops, the middle ones need cobalt and alloy, the last
+ * ones iridium and xenite from the deep sectors.
+ */
+export const VOID_SYSTEM_BANDS: readonly { fromLevel: number, recipe: VoidResourceBundle }[] = [
+    { fromLevel: 0, recipe: { ferrite: 200, scrap: 120 } },
+    { fromLevel: 3, recipe: { ferrite: 160, cobalt: 70, alloy: 10 } },
+    { fromLevel: 6, recipe: { cobalt: 110, iridium: 40, alloy: 15 } },
+    { fromLevel: 8, recipe: { cobalt: 110, iridium: 40, alloy: 15, xenite: 10 } }
+]
+
+/** Gear recipes per tier (authored units). A craft stays cheap so it can be rerolled for rarity. */
+export const VOID_GEAR_RECIPES: readonly VoidResourceBundle[] = [
+    { ferrite: 220, scrap: 80 },
+    { ferrite: 250, cobalt: 220, scrap: 120 },
+    { cobalt: 520, iridium: 360, alloy: 50 },
+    { iridium: 900, xenite: 450, alloy: 150 },
+    { iridium: 1600, xenite: 1200, alloy: 300, core: 1 }
+]
+
+/** Share of the tier recipe that gear level +1 costs; each level after grows by VOID_LEVEL_GROWTH. */
+export const VOID_GEAR_LEVEL_SHARE = [0.25, 0.22, 0.22, 0.2, 0.18] as const
 
 /** What each material counts for in a haul's value (records and the leaderboard). */
 export const VOID_RESOURCE_VALUE: Record<VoidResourceId, number> = {
@@ -63,10 +84,11 @@ export const VOID_RESOURCE_VALUE: Record<VoidResourceId, number> = {
 
 /**
  * Most a hold can take on per minute of flight, whatever the client says. An
- * honest maxed hull mining a rich deep zone stays well under it; a forged
- * report can't bank more than an excellent pilot could.
+ * honest maxed hull mining a rich deep zone stays under it; a forged report
+ * can't bank more than an excellent pilot could, and quitting a run straight
+ * off the pad banks next to nothing.
  */
-export const VOID_HAUL_RATE_CAP = 90
+export const VOID_HAUL_RATE_CAP = 75
 /** Slack over the hull's hold for a haul (rounding and pickups in flight at the dock). */
 export const VOID_HOLD_SLACK = 1.1
 

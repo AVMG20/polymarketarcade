@@ -9,7 +9,7 @@
 // what happened in a run; the server decides what that run was allowed to be
 // worth.
 
-import { VOID_COST_MULT, VOID_HAUL_RATE_CAP, VOID_HOLD_SLACK, VOID_RESOURCE_VALUE, VOID_SYSTEM_GROWTH, voidPrice, voidQty, voidRound } from './economy'
+import { VOID_COST_MULT, VOID_HAUL_RATE_CAP, VOID_HOLD_SLACK, VOID_RESOURCE_VALUE, VOID_SYSTEM_BANDS, VOID_SYSTEM_GROWTH, voidPrice, voidQty, voidRound } from './economy'
 import { VOID_LORE, VOID_MIN_CLAIM_MS, voidCapitalKills, VOID_PERKS, VOID_ZONES, voidNormalizePerks, voidPerkCost, type VoidPerkRanks } from './void-pilot'
 import { VOID_SUPPLIES, VOID_SUPPLY_CARRY, VOID_SUPPLY_STOCK_MAX, voidContractDay, voidContractResetAt, voidContractsFor, voidNormalizeSupplies, voidSupplyCost } from './void-station'
 import {
@@ -544,11 +544,8 @@ export function voidUpgradeCost(id: VoidUpgradeId, level: number): VoidPrice | n
     if (!def || level >= def.maxLevel) return null
     const weight: Record<VoidUpgradeId, number> = { engines: 1, cargo: 1.1, mining: 0.9, drones: 1.2 }
     const grow = weight[id] * Math.pow(VOID_SYSTEM_GROWTH, level)
-    let recipe: VoidResourceBundle
-    if (level < 3) recipe = { ferrite: 200, scrap: 120 }
-    else if (level < 6) recipe = { ferrite: 160, cobalt: 70, alloy: 10 }
-    else recipe = { cobalt: 110, iridium: 40, alloy: 15, ...(level >= 8 ? { xenite: 10 } : {}) }
-    return { resources: voidPrice(recipe, 'system', grow) }
+    const band = [...VOID_SYSTEM_BANDS].reverse().find(b => level >= b.fromLevel)!
+    return { resources: voidPrice(band.recipe, 'system', grow) }
 }
 
 // ─── Fit and derived stats ──────────────────────────────────────────────────
@@ -825,7 +822,7 @@ export function voidSettleRun(report: VoidRunReport, tier: number, wallElapsedMs
         return { haul: {}, units: 0, value: 0, elapsedMs, kills, wardenKilled: false }
     }
 
-    const haul = voidCapHaul(voidCleanBundle(report.haul), tier, Math.min(holdCap * VOID_HOLD_SLACK, VOID_HAUL_RATE_CAP * Math.max(1, elapsedMs / 60_000)))
+    const haul = voidCapHaul(voidCleanBundle(report.haul), tier, Math.min(holdCap * VOID_HOLD_SLACK, Math.max(5, VOID_HAUL_RATE_CAP * elapsedMs / 60_000)))
     // Warp cores come off bosses (plus the odd derelict): no more than the accepted kills drop.
     const capitals = voidCapitalKills(report, elapsedMs)
     const coreCap = 2 + (wardenKilled ? 1 + Math.ceil(tier / 2) : 0)

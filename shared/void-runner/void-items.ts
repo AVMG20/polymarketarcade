@@ -12,7 +12,7 @@
 //
 // The loop: craft T1 gear, level it, clear the sector, craft T2 and start again.
 
-import { VOID_LEVEL_GROWTH, voidPrice } from './economy'
+import { VOID_GEAR_LEVEL_SHARE, VOID_GEAR_RECIPES, VOID_LEVEL_GROWTH, voidPrice } from './economy'
 import type { VoidResourceBundle, VoidResourceId } from './void'
 
 export type VoidItemKind = 'gun' | 'turret' | 'armor' | 'shield' | 'secondary' | 'device'
@@ -272,17 +272,8 @@ export function voidItemName(item: Pick<VoidItem, 'type' | 'tier'> & { affixes?:
 
 // ─── Crafting ───────────────────────────────────────────────────────────────
 
-const TIER_RECIPES: VoidResourceBundle[] = [
-    { ferrite: 220, scrap: 80 },
-    { ferrite: 250, cobalt: 220, scrap: 120 },
-    // A craft stays cheap enough to repeat for a better roll: the real cost
-    // of a tier is in levelling the item you decide to keep.
-    { cobalt: 520, iridium: 360, alloy: 50 },
-    { iridium: 900, xenite: 450, alloy: 150 },
-    { iridium: 2600, xenite: 2300, alloy: 500, core: 1 }
-]
-/** Upgrade material share per tier: cheap to level early gear, heavier late. */
-const TIER_UPGRADE_SHARE = [0.12, 0.15, 0.22, 0.23, 0.22]
+const TIER_RECIPES = VOID_GEAR_RECIPES
+const TIER_UPGRADE_SHARE = VOID_GEAR_LEVEL_SHARE
 const KIND_WEIGHT: Record<VoidItemKind, number> = { gun: 1.2, turret: 1, armor: 0.9, shield: 1, secondary: 1.1, device: 1.3 }
 
 /**

@@ -151,7 +151,10 @@ describe('void runner settlement', () => {
         expect(big.haul.scrap).toBe(50)
         // Thirty seconds of flight can't fill a big hold.
         const quick = voidSettleRun({ extracted: true, haul: { ferrite: 900 }, elapsedMs: 30_000, kills: 0, wardenKilled: false }, 1, 30_000, 1000)
-        expect(quick.units).toBe(VOID_HAUL_RATE_CAP)
+        expect(quick.units).toBe(Math.floor(VOID_HAUL_RATE_CAP / 2))
+        // Quitting off the pad banks next to nothing.
+        const pad = voidSettleRun({ extracted: true, haul: { ferrite: 900 }, elapsedMs: 2_000, kills: 0, wardenKilled: false }, 1, 2_000, 1000)
+        expect(pad.units).toBe(5)
     })
 
     it('caps warp cores by the boss kills the run can be credited with', () => {
