@@ -1,0 +1,104 @@
+import type { H3Event, Session, SessionConfig } from 'h3'
+import { getCookie, getRequestProtocol, unsealSession, updateSession, useSession } from 'h3'
+import { arcadeEnv, PLACEHOLDER_PASSWORD_PREFIX } from './env'
+import { findPlayer } from './players'
+
+export interface ArcadeSessionData {
+    playerId?: string
+}
+
+export const SESSION_COOKIE = 'pnx_arcade'
+/** Sessions last 30 days from the last visit (sliding). */
+const SESSION_MAX_AGE = 60 * 60 * 24 * 30
+/** A session older than this is re-issued on the next request, restarting its 30 days. */
+const SESSION_REFRESH_MS = 24 * 3_600_000
+
+/** True when the request reached us over https (directly or via a proxy's x-forwarded-proto). */
+export function isHttps(event?: H3Event) {
+    return !!event && getRequestProtocol(event, { xForwardedProto: true }) === 'https'
+}
+
+export function sessionConfig(event?: H3Event): SessionConfig {
+    const env = arcadeEnv()
+    if (env.sessionPassword.length < 32 || (env.production && env.sessionPassword.startsWith(PLACEHOLDER_PASSWORD_PREFIX))) {
+        throw createError({ statusCode: 500, statusMessage: 'NUXT_SESSION_PASSWORD must be a secret of at least 32 characters' })
+    }
+    const none = env.sameSite === 'none'
+    return {
+        name: SESSION_COOKIE,
+        password: env.sessionPassword,
+        maxAge: SESSION_MAX_AGE,
+        // Only the cookie carries a session; no `x-…-session` header shortcut.
+        sessionHeader: false,
+        cookie: {
+            httpOnly: true,
+            path: '/',
+            sameSite: env.sameSite,
+            // SameSite=None needs Secure, and Partitioned (CHIPS) to survive
+            // third-party cookie blocking in a foreign-domain iframe.
+            secure: none || env.production || isHttps(event),
+            ...(none ? { partitioned: true } : {})
+        }
+    }
+}
+
+export async function getArcadeSession(event: H3Event) {
+    return useSession<ArcadeSessionData>(event, sessionConfig(event))
+}
+
+/**
+ * Start a fresh session for `playerId`: a new id and a new createdAt, so the
+ * 30 days count from now. (Updating the existing session would keep the
+ * createdAt of the cookie the request carried, and with it the old expiry.)
+ */
+export async function setSessionPlayer(event: H3Event, playerId: string) {
+    const fresh: Session<ArcadeSessionData> = { id: crypto.randomUUID(), createdAt: Date.now(), data: { playerId } }
+    event.context.sessions ??= Object.create(null)
+    event.context.sessions![SESSION_COOKIE] = fresh
+    await updateSession(event, sessionConfig(event))
+}
+
+export async function clearArcadeSession(event: H3Event) {
+    const session = await getArcadeSession(event)
+    await session.clear()
+}
+
+/**
+ * The signed-in player's id; 401 without a session or when it points at a
+ * player that no longer exists. Every protected endpoint starts here. A day-old
+ * session is re-issued, so 30 days count from the last visit.
+ */
+export async function requirePlayerId(event: H3Event): Promise<string> {
+    // No cookie, no session: don't mint an empty one for an anonymous visitor.
+    if (!getCookie(event, SESSION_COOKIE)) throw createError({ statusCode: 401, statusMessage: 'Unauthorized' })
+    const session = await getArcadeSession(event)
+    const playerId = session.data.playerId
+    if (!playerId || !findPlayer(playerId)) throw createError({ statusCode: 401, statusMessage: 'Unauthorized' })
+    const created = event.context.sessions?.[SESSION_COOKIE]?.createdAt as number | undefined
+    if (created && Date.now() - created > SESSION_REFRESH_MS) await setSessionPlayer(event, playerId)
+    return playerId
+}
+
+/**
+ * The player behind a raw `Cookie` header, or null. For WebSocket upgrades,
+ * which have no H3 event: same cookie, same seal, same 30-day expiry and the
+ * same check that the player still exists as requirePlayerId.
+ */
+export async function playerIdFromCookieHeader(header: string | null | undefined): Promise<string | null> {
+    if (!header) return null
+    const pair = header.split(';').map(part => part.trim()).find(part => part.startsWith(`${SESSION_COOKIE}=`))
+    if (!pair) return null
+    let sealed: string
+    try {
+        sealed = decodeURIComponent(pair.slice(SESSION_COOKIE.length + 1))
+    } catch {
+        return null
+    }
+    try {
+        const session = await unsealSession(undefined as unknown as H3Event, sessionConfig(), sealed)
+        const playerId = (session.data as ArcadeSessionData | undefined)?.playerId
+        return playerId && findPlayer(playerId) ? playerId : null
+    } catch {
+        return null
+    }
+}
