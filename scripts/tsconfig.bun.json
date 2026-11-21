@@ -1,0 +1,12 @@
+{
+    // Lets Bun resolve the Nuxt aliases when running a script directly:
+    //   bun --tsconfig-override scripts/tsconfig.bun.json scripts/<name>.ts
+    "compilerOptions": {
+        "baseUrl": "..",
+        "paths": {
+            "#shared/*": ["shared/*"],
+            "#server/*": ["server/*"],
+            "~/*": ["app/*"]
+        }
+    }
+}

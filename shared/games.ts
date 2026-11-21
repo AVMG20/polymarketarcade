@@ -33,7 +33,7 @@ const ALL_GAMES: ArcadeGame[] = [
         cover: '/images/games/dead-front.jpg',
         accent: '#b4532a',
         multiplayer: true,
-        ready: false
+        ready: true
     },
     {
         slug: 'shapezz',

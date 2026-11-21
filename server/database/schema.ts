@@ -4,3 +4,4 @@
  * from here).
  */
 export * from './core'
+export * from './tables/dead-front'
