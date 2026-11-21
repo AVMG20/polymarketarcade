@@ -6,3 +6,4 @@
 export * from './core'
 export * from './tables/dead-front'
 export * from './tables/shapezz'
+export * from './tables/pirate-raid'

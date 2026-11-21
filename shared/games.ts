@@ -51,13 +51,13 @@ const ALL_GAMES: ArcadeGame[] = [
         slug: 'pirate-raid',
         name: 'Pirate Raid',
         tagline: 'Build a warship and survive the raid',
-        description: 'Arm your ship, pick a difficulty and survive a six-minute ocean raid. Plunder buys cannons, abilities and upgrades.',
+        description: 'Arm your ship, pick a difficulty and survive a six-minute ocean raid. Doubloons buy cannons, abilities and upgrades.',
         path: '/pirates',
         icon: 'lucide:anchor',
         cover: '/images/games/pirates.jpg',
         accent: '#1f8fbf',
         multiplayer: false,
-        ready: false
+        ready: true
     },
     {
         slug: 'void-runner',

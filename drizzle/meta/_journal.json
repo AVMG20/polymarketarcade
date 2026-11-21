@@ -22,6 +22,13 @@
       "when": 1795285647374,
       "tag": "0002_shapezz",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1795285667403,
+      "tag": "0003_pirate-raid",
+      "breakpoints": true
     }
   ]
 }
