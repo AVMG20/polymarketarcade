@@ -1,11 +1,9 @@
 <!--
-  A game page: the slim bar, then the game filling the rest of the viewport.
-  Games that cover the whole window (pointer lock, fullscreen) still sit in
-  this box until they ask for more.
+  A game page: the game fills the whole viewport. Games bring their own tabs;
+  the hub's bar (or the browser) handles getting back out.
 -->
 <template>
   <div class="flex h-dvh flex-col overflow-hidden">
-    <ArcadeTopBar />
     <main class="relative min-h-0 flex-1">
       <slot />
     </main>
