@@ -60,6 +60,7 @@ export default defineNuxtConfig({
         // Vite re-optimizes and reloads the page, which ends a running match.
         optimizeDeps: {
             include: [
+                'pixi.js',
                 'three',
                 'three/addons/loaders/GLTFLoader.js',
                 'three/addons/utils/BufferGeometryUtils.js',
