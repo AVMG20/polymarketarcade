@@ -1,0 +1,4590 @@
+<script setup lang="ts">
+import TownIcon from '~/components/polytown/TownIcon.vue'
+import { amountPreview } from '~/utils/polytown/amount'
+import { townToast } from '~/utils/polytown/toast'
+import { parseAmount } from '#shared/polytown/parse-amount'
+import { rankTownUpgrades, townCanAfford, townTicksPerHour, townUpgradeCandidates, TOWN_ADVICE_LABELS } from '#shared/polytown/town-advisor'
+import TownCoin from '~/components/polytown/TownCoin.vue'
+import { townIsTyping } from '~/utils/polytown/camera'
+import TownAsset from '~/components/polytown/TownAsset.vue'
+import TownScene from '~/components/polytown/TownScene.client.vue'
+import TownMarketPanel from '~/components/polytown/TownMarketPanel.vue'
+import TownMilestonesPanel from '~/components/polytown/TownMilestonesPanel.vue'
+import TownLeaderboardPanel from '~/components/polytown/TownLeaderboardPanel.vue'
+import TownEventsPanel from '~/components/polytown/TownEventsPanel.vue'
+import TownStreakPanel from '~/components/polytown/TownStreakPanel.vue'
+import TownContractsPanel from '~/components/polytown/TownContractsPanel.vue'
+import TownFx from '~/components/polytown/TownFx.vue'
+import TownChestOpening from '~/components/polytown/TownChestOpening.vue'
+import TownBoostIcon from '~/components/polytown/TownBoostIcon.vue'
+import type { TownContractDelivery } from '~/composables/useTownContracts'
+import { formatTownDuration } from '~/utils/polytown/format'
+import { townTerrainCss } from '~/utils/polytown/terrain'
+import { TOWN_TERRAINS, TOWN_TERRAIN_BONUS, TOWN_PLOT_SIZE, TOWN_INDUSTRY_PENALTY_SCALE, townEffectRadius, townCivicCheer, houseAdjacency, townLevelCost, townRushGemCost, getTownBuilding, townPlacementIssue, townAutoFacing, townFrontTiles, townRoadAt, townIndustryNuisance, townHousesWithin, townWorkersFor, townPlaceCost, townGroupMoveIssue, townBuildingCountIssue, townRoadAccess, townBuildingSize, townFootprintAnchor, townSupplyPath, TOWN_MAX_DRAG_TILES, type TownSimBuilding } from '#shared/polytown/town'
+import { getTownMonument, townBonusLabel, townBonusLines, townBonusValue, townMonumentEffect } from '#shared/polytown/town-monuments'
+import { townJobProgress, townBoostedJobMs, type TownBuildingView, type TownBoostKind, type TownStoredView, type TownSpot } from '~/composables/useTown'
+import type { SceneTile, SceneMoveGhost } from '~/components/polytown/TownScene.client.vue'
+import type { TownDraftSpot, TownRedesignDraft } from '#shared/polytown/town-storage'
+import { TOWN_BOOSTER_KINDS, townBoosterCount, type TownBoosterKind } from '#shared/polytown/town-boosts'
+
+const town = useTown()
+const sound = useTownSound()
+const motion = useTownMotion()
+const theme = useTownTheme()
+const THEME_TIPS = { system: 'Day & night follow your system', sun: 'Day & night follow the real sun', day: 'Always day', night: 'Always night' } as const
+const THEME_ICONS = { system: 'i-lucide-sun-moon', sun: 'i-lucide-sunset', day: 'i-lucide-sun', night: 'i-lucide-moon' } as const
+const fx = useTownFx()
+const toast = townToast()
+const wallet = useTownWallet()
+const hub = useHubBridge()
+
+/** The town's own coins. */
+const balance = computed(() => wallet.balanceNum.value)
+/** The player's platform gems at the hub; null until the hub has said (or for a dev player). */
+const gems = computed(() => wallet.gems.value)
+/** A gem price the player is known to be short of. Unknown gems leave the button on: the server says why. */
+function gemsShort(cost: number) {
+    return gems.value !== null && gems.value < cost
+}
+onMounted(() => {
+    listenForHubGems()
+    wallet.fetchGems()
+})
+
+// ── Clock (server-aligned) ──
+const now = ref(Date.now())
+let clock: ReturnType<typeof setInterval> | null = null
+onMounted(() => { clock = setInterval(() => { now.value = Date.now() + town.serverOffsetMs.value }, 500) })
+onBeforeUnmount(() => { if (clock) clearInterval(clock) })
+
+// ── UI state ──
+type Window = 'market' | 'goals' | 'mayors' | 'land' | 'events' | 'daily' | null
+const windowOpen = ref<Window>(null)
+const buildOpen = ref(false)
+const buildTier = ref(0)
+const ghostType = ref<string | null>(null)
+const ghostRotation = ref(0)
+/** A quarter turn clockwise, or back the other way with `dir = -1` (Shift+R). */
+function rotatePlacement(dir: 1 | -1 = 1) {
+    ghostRotation.value = (ghostRotation.value + dir + 4) % 4
+    sound.play('rotate')
+}
+/** Building being relocated; its type becomes the ghost and the original hides. */
+const movingId = ref<string | null>(null)
+/** A building coming back out of storage: its type is the ghost. */
+const placingStored = ref<TownStoredView | null>(null)
+// Whatever lets go of the ghost lets go of the stored building with it.
+watch(ghostType, (t) => { if (!t) placingStored.value = null })
+const hoveredTile = ref<{ plotId: string, tileX: number, tileY: number, wx: number, wy: number } | null>(null)
+const selectedBuildingId = ref<string | null>(null)
+/** Everything a marquee has gathered up, or a shift-click has toggled in. */
+const selectedIds = ref<string[]>([])
+/** Tiles the current placement drag covers, sent up by the scene. */
+const dragTiles = ref<SceneTile[]>([])
+/** A whole selection riding on the cursor: offsets from the tile under it. */
+const moveSelection = ref<{ items: SceneMoveGhost[] } | null>(null)
+const marketResource = ref<string | null>(null)
+/** Counts state refreshes, so an open notification list learns a build finished under it. */
+const stateTick = ref(0)
+watch(() => town.state.value?.serverNow, () => { stateTick.value++ })
+/** The happiness popover. Hover only. */
+const moodOpen = ref(false)
+/** The income popover. Hover only — there is nothing in it to click. */
+const incomeOpen = ref(false)
+/** The builders popover: what a free crew should be put on. */
+const buildersPop = ref(false)
+const busy = ref(false)
+const sceneRef = ref<InstanceType<typeof TownScene> | null>(null)
+const hoveredBuildingId = ref<string | null>(null)
+const hoveredSlot = ref<{ x: number, y: number, free: boolean, ownerName?: string } | null>(null)
+const hoveredNeighbour = ref<{ plotId: string, ownerName: string, type?: string, level?: number } | null>(null)
+/**
+ * The cursor tooltips follow the pointer through CSS custom properties rather
+ * than a ref. A ref here is a render dependency, so every mousemove re-ran the
+ * whole game template — four hundred elements — at pointer rate, for the sake
+ * of two numbers only three absolutely-positioned boxes ever read.
+ */
+const rootEl = ref<HTMLElement | null>(null)
+function trackPointer(e: MouseEvent) {
+    const el = rootEl.value
+    if (!el) return
+    el.style.setProperty('--cursor-x', `${e.clientX + 16}px`)
+    el.style.setProperty('--cursor-y', `${e.clientY + 16}px`)
+}
+
+// A site being relocated is drawn as the building it will become — level 0 has
+// no artwork of its own.
+const ghostLevel = computed(() => {
+    if (trayPick.value && trayPick.value !== 'road') return Math.max(1, trayGroups.value.find(g => g.key === trayPick.value)?.level ?? 1)
+    if (placingStored.value) return Math.max(1, placingStored.value.upgradingTo ?? placingStored.value.level)
+    return movingId.value ? Math.max(1, town.buildings.value.find(b => b.id === movingId.value)?.level ?? 1) : 1
+})
+const selectedBuilding = computed(() => town.buildings.value.find(b => b.id === selectedBuildingId.value) ?? null)
+const selectedEntry = computed(() => selectedBuilding.value ? town.catalogById.value.get(selectedBuilding.value.type) ?? null : null)
+const hoveredBuilding = computed(() => sceneBuildings.value.find(b => b.id === hoveredBuildingId.value) ?? null)
+const hoveredEntry = computed(() => hoveredBuilding.value ? town.catalogById.value.get(hoveredBuilding.value.type) ?? null : null)
+
+watch(selectedBuilding, (b) => { if (!b) selectedBuildingId.value = null })
+watch(town.resources, (list) => { sceneRef.value?.setResourceEmoji(Object.fromEntries(list.map(r => [r.id, r.emoji]))) }, { immediate: true })
+
+function openWindow(w: Window) {
+    sound.unlock()
+    closeHudPopovers()
+    if (redesign.value) return
+    if (windowOpen.value === w) { closeAll(); return }
+    windowOpen.value = w
+    buildOpen.value = false
+    ghostType.value = null
+    sound.play('open')
+}
+
+function toggleBuild() {
+    sound.unlock()
+    closeHudPopovers()
+    if (redesign.value) return
+    if (buildOpen.value) { buildOpen.value = false; ghostType.value = null; sound.play('close'); return }
+    windowOpen.value = null
+    selectedBuildingId.value = null
+    buildOpen.value = true
+    sound.play('open')
+}
+
+function closeAll() {
+    closeHudPopovers()
+    if (windowOpen.value || buildOpen.value || selectedBuildingId.value || selectedIds.value.length) sound.play('close')
+    windowOpen.value = null
+    buildOpen.value = false
+    ghostType.value = null
+    movingId.value = null
+    selectedBuildingId.value = null
+    selectedIds.value = []
+    moveSelection.value = null
+}
+
+// ── Build ──
+/** The build strip's last tab: the monuments, whatever tier each opens at. */
+const MONUMENT_TAB = -1
+/** The tab after monuments, only while something is in storage: put stored buildings back. */
+const STORAGE_TAB = -2
+const tiers = computed(() => [...new Set(town.catalog.value.filter(c => c.kind !== 'monument').map(c => c.tier))].sort((a, b) => a - b))
+const tierEntries = computed(() => buildTier.value === STORAGE_TAB
+    ? []
+    : buildTier.value === MONUMENT_TAB
+        ? town.catalog.value.filter(c => c.kind === 'monument')
+        : town.catalog.value.filter(c => c.tier === buildTier.value && c.kind !== 'monument'))
+function tierLocked(t: number) { return t !== MONUMENT_TAB && t !== STORAGE_TAB && !town.unlockedTiers.value.has(t) }
+const hasStored = computed(() => town.storage.value.items.length > 0)
+/** The Storage tab's cards: one per stored building, and every stored road on a single stacked card. */
+const storageCards = computed(() => {
+    const items = town.storage.value.items
+    const roads = items.filter(s => s.type === 'road')
+    const cards = items.filter(s => s.type !== 'road').map(item => ({ item, count: 1 }))
+    return roads.length ? [{ item: roads[0]!, count: roads.length }, ...cards] : cards
+})
+// Storage emptied under an open Storage tab: fall back to the first tier.
+watch(hasStored, (has) => { if (!has && buildTier.value === STORAGE_TAB) buildTier.value = tiers.value[0] ?? 0 })
+/** Stages this town carried over from research for a monument: it goes up at that stage, free. */
+function monumentCredit(type: string) { return town.monumentCredit.value[type] ?? 0 }
+/** A card is shut while its tier is, unless research already paid for it. */
+function cardLocked(c: { id: string, tier: number }) { return tierLocked(c.tier) && !monumentCredit(c.id) }
+/** The monument crew raises one stage at a time; this is what it is on, if anything. */
+const monumentJob = computed(() => town.buildings.value.find(b => b.id === town.monumentJob.value) ?? null)
+const monumentCrewNote = computed(() => {
+    const job = monumentJob.value
+    if (!job) return null
+    return `The monument crew is on the ${town.catalogById.value.get(job.type)?.name ?? job.type} for another ${formatTownDuration(Math.max(0, job.completesAt - now.value))}`
+})
+/** The unmet conditions of a locked tier, in plain words. */
+function tierLockText(t: number): string {
+    const lock = town.tierLocks.value[t]
+    if (!lock) return ''
+    const parts: string[] = []
+    if (lock.needsBuilding) parts.push(`a tier ${t - 1} building`)
+    if (lock.pop < lock.popRequired) parts.push(`${formatNumber(lock.popRequired)} residents (${formatNumber(lock.pop)})`)
+    if (lock.produced < lock.producedRequired) parts.push(`${formatNumber(lock.producedRequired)} tier-${lock.producedTier} goods (${formatNumber(lock.produced)})`)
+    return `needs ${parts.join(' · ')}`
+}
+function tierName(t: number) { return t === 0 ? 'Town' : `Tier ${t}` }
+function pickTier(t: number) {
+    if (buildTier.value === t) return
+    buildTier.value = t
+    sound.play('tab')
+}
+/** Tab and Shift+Tab walk the tabs, monuments then storage last. */
+function cycleTier(dir: 1 | -1) {
+    const tabs = [...tiers.value, MONUMENT_TAB, ...(hasStored.value ? [STORAGE_TAB] : [])]
+    const at = Math.max(0, tabs.indexOf(buildTier.value))
+    pickTier(tabs[(at + dir + tabs.length) % tabs.length]!)
+}
+
+function canAfford(cost: { coins: number, resources: Record<string, number> }) {
+    return townCanAfford(cost, balance.value, town.inventory.value)
+}
+
+/** Why the town may not put up another of `type`, or null. Mirrors the server's count cap. */
+function countIssue(type: string): string | null {
+    const def = getTownBuilding(type)
+    return def ? townBuildingCountIssue(def, town.countsByType.value[type] ?? 0) : null
+}
+
+function pickBuild(type: string) {
+    // The held card again puts it down, whatever would block picking up another.
+    if (ghostType.value === type && !movingId.value) {
+        sound.play('close')
+        ghostType.value = null
+        ghostRotation.value = 0
+        selectedBuildingId.value = null
+        return
+    }
+    const capped = countIssue(type)
+    if (capped) {
+        toast.add({ title: capped, color: 'neutral' })
+        return
+    }
+    // Roads go up instantly and need nobody; monuments have their own crew;
+    // everything else needs a free builder.
+    const def = town.catalogById.value.get(type)
+    if (def?.kind === 'monument' && !monumentCredit(type) && monumentCrewNote.value) {
+        toast.add({ title: monumentCrewNote.value, color: 'warning' })
+        return
+    }
+    if (def && def.kind !== 'road' && def.kind !== 'monument' && buildersFree.value === 0) {
+        openBlocked({ kind: 'build', type })
+        return
+    }
+    sound.play('pickup')
+    movingId.value = null
+    placingStored.value = null
+    ghostType.value = type
+    ghostRotation.value = 0
+    selectedBuildingId.value = null
+}
+
+/** Pick up another of the building under the cursor (or the open card), like an eyedropper. */
+function copyBuilding() {
+    const b = hoveredBuilding.value ?? selectedBuilding.value
+    if (!b || redesign.value || moveSelection.value) return
+    // Already holding it: a second C must not drop it again.
+    if (ghostType.value === b.type && !movingId.value) return
+    const entry = town.catalogById.value.get(b.type)
+    if (!entry || cardLocked(entry)) { sound.play('deny'); return }
+    pickBuild(b.type)
+    if (ghostType.value === b.type && entry.kind !== 'road') ghostRotation.value = b.rotation
+}
+
+function startMove() {
+    const b = selectedBuilding.value
+    if (!b) return
+    sound.play('pickup')
+    movingId.value = b.id
+    placingStored.value = null
+    ghostType.value = b.type
+    // A site travels as the building it will become, so it reads as itself.
+    ghostRotation.value = b.rotation
+    selectedBuildingId.value = null
+    selectedIds.value = []
+    buildOpen.value = false
+}
+
+// ── Storage ─────────────────────────────────────────────────────────────────
+// Buildings taken off the map, free to keep. They make nothing while stored,
+// and come back out from the build strip's Storage tab.
+
+/** Why a stored building cannot come back out right now: a paused job needs its crew back. */
+function storedCrewIssue(item: TownStoredView): string | null {
+    if (!item.paused) return null
+    if (getTownMonument(item.type)) return town.monumentJob.value ? 'The monument crew is busy' : null
+    return buildersFree.value > 0 ? null : 'Every builder is busy: a paused job needs a free crew'
+}
+
+/** Take buildings off the map into storage, roads included. */
+function storeIds(ids: string[]) {
+    if (ids.length === 0) return
+    const before = { ids: selectedIds.value.filter(id => ids.includes(id)), single: selectedBuildingId.value }
+    fire(() => town.storeBuildings(ids), 'pickup', () => restoreSelection(before.ids, before.single))
+    selectedIds.value = selectedIds.value.filter(id => !ids.includes(id))
+    if (selectedBuildingId.value && ids.includes(selectedBuildingId.value)) selectedBuildingId.value = null
+}
+
+const storeTip = 'Take it off the map. It makes nothing while stored; put it back from the Storage tab in Build.'
+
+/** A stored building on the cursor, waiting for a tile. From the build strip's Storage tab the strip stays open. */
+function startPlaceStored(item: TownStoredView, fromStrip = false) {
+    // The held card again puts it down, like any other build card.
+    if (fromStrip && placingStored.value?.id === item.id) { sound.play('close'); ghostType.value = null; return }
+    const issue = storedCrewIssue(item)
+    if (issue) { sound.play('deny'); toast.add({ title: issue, color: 'warning' }); return }
+    sound.play('pickup')
+    windowOpen.value = null
+    if (!fromStrip) buildOpen.value = false
+    selectedBuildingId.value = null
+    selectedIds.value = []
+    movingId.value = null
+    ghostType.value = item.type
+    ghostRotation.value = 0
+    placingStored.value = item
+}
+
+/**
+ * A wide building is held by its middle: the tile under the cursor is the
+ * centre of its footprint, and this is the corner the server stores it by.
+ * Near a plot edge, keep the whole footprint on the plot under the cursor.
+ */
+function anchorTile<T extends { plotId: string, tileX: number, tileY: number }>(tile: T): T & { wx: number, wy: number } {
+    const plot = plotById.value.get(tile.plotId)
+    const wx = (plot?.x ?? 0) * TOWN_PLOT_SIZE + tile.tileX
+    const wy = (plot?.y ?? 0) * TOWN_PLOT_SIZE + tile.tileY
+    const size = ghostType.value && !moveSelection.value ? townBuildingSize(ghostType.value) : 1
+    const anchor = townFootprintAnchor(wx, wy, size)
+    if (!plot) return { ...tile, ...anchor }
+    return { ...tile, tileX: anchor.wx - plot.x * TOWN_PLOT_SIZE, tileY: anchor.wy - plot.y * TOWN_PLOT_SIZE, ...anchor }
+}
+
+async function onSelectTile(cursorTile: { plotId: string, tileX: number, tileY: number }) {
+    const tile = anchorTile(cursorTile)
+    sound.unlock()
+    if (redesign.value) { placeDraft(tile); return }
+    if (moveSelection.value) {
+        if (busy.value) return
+        await commitGroupMove(tile)
+        return
+    }
+    if (!ghostType.value) {
+        if (!buildOpen.value) toggleBuild()
+        return
+    }
+    if (busy.value) return
+    const issue = placementIssueAt(tile)
+    // Out of crews is the one blocker with a way through: offer the rush.
+    if (issue === NO_CREWS && issue === ghostBlocker.value && !movingId.value) {
+        openBlocked({ kind: 'build', type: ghostType.value })
+        return
+    }
+    if (issue) {
+        denyPlacement(issue, tile)
+        return
+    }
+    // The town shows each of these at once, so the next click need not wait.
+    if (placingStored.value) {
+        const wasRoad = placingStored.value.type === 'road'
+        const spot = { buildingId: placingStored.value.id, plotId: tile.plotId, tileX: tile.tileX, tileY: tile.tileY, rotation: ghostRotation.value }
+        fire(() => town.placeStored(spot), wasRoad ? 'road' : 'place')
+        // Stored roads come out one click at a time until the stack runs dry.
+        const nextRoad = wasRoad ? town.storage.value.items.find(s => s.type === 'road') : undefined
+        if (nextRoad) placingStored.value = nextRoad
+        else ghostType.value = null
+    } else if (movingId.value) {
+        const id = movingId.value
+        fire(() => town.moveBuilding(id, tile.plotId, tile.tileX, tile.tileY, ghostRotation.value), 'place')
+        movingId.value = null
+        ghostType.value = null
+    } else {
+        const type = ghostType.value
+        fire(() => town.placeBuilding(tile.plotId, tile.tileX, tile.tileY, type, ghostRotation.value), type === 'road' ? 'road' : 'place')
+        // The last one the town may own: nothing left to hold.
+        if (ghostType.value === type && countIssue(type)) ghostType.value = null
+    }
+}
+
+/**
+ * A click the ghost cannot take: it shakes and knocks. The reason already
+ * floats over the ghost when there was a hover; a tap has none, so it toasts.
+ */
+function denyPlacement(issue: string, tile: { wx: number, wy: number } | null) {
+    sound.play('deny')
+    sceneRef.value?.denyGhost()
+    const hovered = hoveredTile.value
+    if (!tile || !hovered || hovered.wx !== tile.wx || hovered.wy !== tile.wy) toast.add({ title: issue, color: 'warning' })
+}
+
+function onHoverTile(cursorTile: { plotId: string, tileX: number, tileY: number, wx: number, wy: number } | null) {
+    const tile = cursorTile ? anchorTile(cursorTile) : null
+    hoveredTile.value = tile
+    // Auto-face the nearest road when the current rotation has none in front,
+    // so most placements never need the R key.
+    if (!tile || !ghostType.value) return
+    const def = town.catalogById.value.get(ghostType.value)
+    if (!def || def.kind === 'road') return
+    const others = movingId.value ? simBuildings.value.filter(b => b.id !== movingId.value) : simBuildings.value
+    if (townFrontTiles(tile.wx, tile.wy, ghostRotation.value, def.size ?? 1).some(f => townRoadAt(others, f.wx, f.wy))) return
+    const auto = townAutoFacing(others, tile.wx, tile.wy, def.size ?? 1)
+    if (auto !== null) ghostRotation.value = auto
+}
+
+function onSelectBuilding(id: string) {
+    sound.unlock()
+    closeHudPopovers()
+    if (redesign.value) { selectedIds.value = []; pickUpDraft(id); return }
+    sound.play('select')
+    ghostType.value = null
+    buildOpen.value = false
+    windowOpen.value = null
+    selectedBuildingId.value = id
+    // One card at a time: a click is a fresh selection, the way it reads in
+    // every builder. Drag a band to keep a block.
+    selectedIds.value = []
+}
+
+function onDeselect() {
+    if (redesign.value) { dropTrayPick(); return }
+    if (moveSelection.value) { moveSelection.value = null; sound.play('close'); return }
+    if (ghostType.value) { ghostType.value = null; movingId.value = null; sound.play('close'); return }
+    if (selectedIds.value.length) { clearSelection(); sound.play('close'); return }
+    if (selectedBuildingId.value) { selectedBuildingId.value = null; sound.play('close') }
+}
+
+// ── Redesign ────────────────────────────────────────────────────────────────
+// The whole town goes into a tray and comes back down one piece at a time.
+// Nothing changes in the town until the final Save: the draft is a map of
+// building id to tile, laid over a snapshot of the town taken when the mode
+// was entered. A save with pieces still in the tray keeps the draft on the
+// server instead, and reopening merges it with the town as it then stands.
+
+type DraftSpot = TownDraftSpot
+const redesign = ref<{
+    /** The town as it stood when the tray opened — the pieces to put back. */
+    original: TownBuildingView[]
+    /** What was in storage when the tray opened: pieces that may come back out. */
+    stored: TownStoredView[]
+    /** Where each piece has been put down, by building id. Absent = still in the tray. */
+    placed: Record<string, DraftSpot>
+    /** Roads laid beyond the ones the town had, paid for on save. */
+    newRoads: Record<string, DraftSpot>
+    /** Buildings from the map marked to go into storage on the final save. */
+    toStore: string[]
+} | null>(null)
+/** What the tray has handed to the cursor: a group key, or 'road'. */
+const trayPick = ref<string | null>(null)
+const confirmRedesign = ref<{ moves: DraftSpot[], roads: DraftSpot[], store: string[], place: string[] } | null>(null)
+
+/** One tray card per kind, level and origin; stored pieces get their own card. */
+function trayKey(b: { type: string, level: number, upgradingTo: number | null }, stored: boolean) {
+    return `${b.type}:${b.upgradingTo ?? b.level}:${b.level === 0 ? 'site' : ''}:${stored ? 'stored' : ''}`
+}
+
+/** A stored building drawn on the draft where it has been put down. */
+function storedAsView(s: TownStoredView, spot: DraftSpot): TownBuildingView {
+    return {
+        id: s.id, type: s.type, ...spot, level: s.level,
+        upgradingTo: s.paused ? s.upgradingTo : null,
+        // Not `now.value`: a dependency on the clock would redraw the draft twice a second.
+        completesAt: s.paused ? town.serverNow() + s.remainingMs : 0,
+        createdAt: s.createdAt,
+        staffing: null, connected: true, district: null, jobMs: null, nextUpgradeMs: null, supply: null, throughput: null
+    }
+}
+const ROAD_DEF = getTownBuilding('road')!
+let newRoadSeq = 0
+
+/** Whether anything has been put down or marked since the tray opened. */
+const draftTouched = computed(() => !!redesign.value && (Object.keys(redesign.value.placed).length > 0 || Object.keys(redesign.value.newRoads).length > 0 || redesign.value.toStore.length > 0))
+
+/** The draft as building rows, so the scene and every rule see the layout being drawn. */
+const redesignBuildings = computed<TownBuildingView[]>(() => {
+    const r = redesign.value
+    if (!r) return []
+    const out: TownBuildingView[] = []
+    for (const b of r.original) {
+        const spot = r.placed[b.id]
+        if (spot) out.push({ ...b, ...spot })
+    }
+    for (const s of r.stored) {
+        const spot = r.placed[s.id]
+        if (spot) out.push(storedAsView(s, spot))
+    }
+    for (const [id, spot] of Object.entries(r.newRoads)) {
+        out.push({
+            id, type: 'road', ...spot, level: 1, upgradingTo: null, completesAt: 0, createdAt: 0,
+            staffing: null, connected: true, district: null, jobMs: null, nextUpgradeMs: null, supply: null, throughput: null
+        })
+    }
+    return out
+})
+/** What the scene draws: the draft while redesigning, the town otherwise. */
+const sceneBuildings = computed(() => redesign.value ? redesignBuildings.value : town.buildings.value)
+// A selection outlives a poll, but not a demolition: drop whatever is gone.
+watch(() => sceneBuildings.value, (list) => {
+    if (selectedIds.value.length === 0 && !moveSelection.value) return
+    const alive = new Set(list.map(b => b.id))
+    if (selectedIds.value.some(id => !alive.has(id))) selectedIds.value = selectedIds.value.filter(id => alive.has(id))
+    if (moveSelection.value?.items.some(i => !alive.has(i.id))) moveSelection.value = null
+})
+
+interface TrayGroup { key: string, type: string, name: string, level: number, site: boolean, stored: boolean, ids: string[] }
+/** The pieces still in the tray, one card per kind and level. Roads have their own card; stored pieces their own. */
+const trayGroups = computed<TrayGroup[]>(() => {
+    const r = redesign.value
+    if (!r) return []
+    const groups = new Map<string, TrayGroup>()
+    const add = (b: { id: string, type: string, level: number, upgradingTo: number | null }, stored: boolean) => {
+        const key = trayKey(b, stored)
+        let g = groups.get(key)
+        if (!g) groups.set(key, g = { key, type: b.type, name: town.catalogById.value.get(b.type)?.name ?? b.type, level: b.upgradingTo ?? b.level, site: b.level === 0, stored, ids: [] })
+        g.ids.push(b.id)
+    }
+    const marked = new Set(r.toStore)
+    for (const b of r.original) if (b.type !== 'road' && !r.placed[b.id] && !marked.has(b.id)) add(b, false)
+    // Stored roads join the road card's stack rather than getting a card of their own.
+    for (const s of r.stored) if (s.type !== 'road' && !r.placed[s.id]) add(s, true)
+    return [...groups.values()].sort((a, b) => Number(a.stored) - Number(b.stored) || a.name.localeCompare(b.name) || a.level - b.level)
+})
+/** Roads the town already had on the map that are not down yet, nor marked for storage: on save they go into storage. */
+const trayRoads = computed(() => {
+    const r = redesign.value
+    if (!r) return []
+    const marked = new Set(r.toStore)
+    return r.original.filter(b => b.type === 'road' && !r.placed[b.id] && !marked.has(b.id)).map(b => b.id)
+})
+/** Stored roads not put down: laid before any new road is bought, and left in storage otherwise. */
+const storedRoadsLeft = computed(() => redesign.value ? redesign.value.stored.filter(s => s.type === 'road' && !redesign.value!.placed[s.id]).map(s => s.id) : [])
+/** Buildings from the map neither put down nor marked for storage: the final Save waits for zero. */
+const trayLeft = computed(() => trayGroups.value.filter(g => !g.stored).reduce((n, g) => n + g.ids.length, 0))
+/** Stored pieces put down in the draft: on save they come out of storage. */
+const draftFromStorage = computed(() => redesign.value ? redesign.value.stored.filter(s => redesign.value!.placed[s.id]).map(s => s.id) : [])
+/** The pieces marked for storage, as tray cards so a mark can be taken back. */
+const markedGroups = computed(() => {
+    const r = redesign.value
+    if (!r) return []
+    const groups = new Map<string, { key: string, type: string, name: string, level: number, ids: string[] }>()
+    for (const id of r.toStore) {
+        const b = r.original.find(x => x.id === id)
+        if (!b) continue
+        const key = trayKey(b, false)
+        let g = groups.get(key)
+        if (!g) groups.set(key, g = { key, type: b.type, name: town.catalogById.value.get(b.type)?.name ?? b.type, level: b.upgradingTo ?? b.level, ids: [] })
+        g.ids.push(b.id)
+    }
+    return [...groups.values()].sort((a, b) => a.name.localeCompare(b.name) || a.level - b.level)
+})
+const draftTotal = computed(() => redesign.value ? redesign.value.original.filter(b => b.type !== 'road').length : 0)
+/** What the new roads will cost: the n-th road counts every road still standing. */
+const newRoadCost = computed(() => {
+    const r = redesign.value
+    if (!r) return 0
+    const standing = [...r.original, ...r.stored].filter(b => b.type === 'road' && r.placed[b.id]).length
+    let coins = 0
+    const n = Object.keys(r.newRoads).length
+    for (let i = 0; i < n; i++) coins += townPlaceCost(ROAD_DEF, standing + i).coins
+    return coins
+})
+const newRoadCount = computed(() => redesign.value ? Object.keys(redesign.value.newRoads).length : 0)
+/** Placed buildings whose front door has no road: they go dark, and the confirm says so. */
+const draftDoorless = computed(() => redesign.value ? simBuildings.value.filter(b => !townRoadAccess(simBuildings.value, b)).length : 0)
+const redesignSaveIssue = computed(() => {
+    if (newRoadCost.value > balance.value) return 'Not enough coins for the new roads'
+    return null
+})
+/** Pieces still in the tray: Save keeps a draft instead of changing the town. */
+const redesignIsDraft = computed(() => trayLeft.value > 0)
+
+/**
+ * Lay a saved draft over the town as it stands now. Pieces that no longer
+ * exist drop out; new buildings are simply not placed yet, so they wait in
+ * the tray; levels come from the town, not the draft. A spot that now clashes
+ * with the ground or an earlier piece goes back to the tray.
+ */
+function mergeDraft(saved: TownRedesignDraft, original: TownBuildingView[], stored: TownStoredView[]) {
+    const known = new Map<string, string>([...original.map(b => [b.id, b.type] as const), ...stored.map(s => [s.id, s.type] as const)])
+    const placed: Record<string, DraftSpot> = {}
+    const newRoads: Record<string, DraftSpot> = {}
+    const layout: TownSimBuilding[] = []
+    const fits = (id: string, type: string, spot: DraftSpot) => {
+        const plot = plotById.value.get(spot.plotId)
+        if (!plot) return false
+        const wx = plot.x * TOWN_PLOT_SIZE + spot.tileX
+        const wy = plot.y * TOWN_PLOT_SIZE + spot.tileY
+        if (groundIssue(wx, wy, type, layout)) return false
+        layout.push({ id, type: type as TownSimBuilding['type'], level: 1, completesAt: 0, upgradingTo: null, createdAt: 0, wx, wy, rotation: spot.rotation })
+        return true
+    }
+    for (const [id, spot] of Object.entries(saved.placed)) {
+        const type = known.get(id)
+        if (type && fits(id, type, spot)) placed[id] = spot
+    }
+    for (const [id, spot] of Object.entries(saved.newRoads)) {
+        if (fits(id, 'road', spot)) newRoads[id] = spot
+    }
+    const onMap = new Set(original.map(b => b.id))
+    const toStore = saved.toStore.filter(id => onMap.has(id) && !placed[id])
+    return { placed, newRoads, toStore }
+}
+
+async function startRedesign() {
+    if (!town.initialized.value || busy.value || redesign.value) return
+    sound.unlock()
+    // The redesign starts from the town as the server has it: placements still
+    // on their way carry temporary ids it could not save.
+    busy.value = true
+    try {
+        await town.idle()
+    } finally {
+        busy.value = false
+    }
+    if (redesign.value) return
+    closeAll()
+    const original = town.buildings.value.map(b => ({ ...b }))
+    const stored = town.storage.value.items.map(s => ({ ...s }))
+    const saved = town.redesignDraft.value?.draft
+    redesign.value = { original, stored, ...(saved ? mergeDraft(saved, original, stored) : { placed: {}, newRoads: {}, toStore: [] }) }
+    newRoadSeq = Math.max(newRoadSeq, ...Object.keys(redesign.value.newRoads).map(k => Number(k.split(':')[1]) || 0))
+    trayPick.value = null
+    sound.play('open')
+}
+
+/** Mark pieces from the map to go into storage on the final save; they leave the draft. */
+function markForStorage(ids: string[]) {
+    const r = redesign.value
+    if (!r) return
+    const onMap = new Set(r.original.map(b => b.id))
+    const marking = ids.filter(id => onMap.has(id))
+    if (marking.length === 0) return
+    r.placed = Object.fromEntries(Object.entries(r.placed).filter(([id]) => !marking.includes(id)))
+    r.toStore = [...new Set([...r.toStore, ...marking])]
+    selectedIds.value = selectedIds.value.filter(id => !marking.includes(id))
+    moveSelection.value = null
+    if (trayPick.value && !trayGroups.value.some(g => g.key === trayPick.value)) dropTrayPick()
+    sound.play('pickup')
+}
+
+/**
+ * Finish the redesign now: whatever from the map is still in the tray goes
+ * into storage, and the layout is saved for real through the usual confirm.
+ * Pieces already in storage stay there. Keep editing undoes nothing: the
+ * marks stay, and can be taken back from the tray one by one.
+ */
+function saveAndStoreSurplus() {
+    const surplus = trayGroups.value.filter(g => !g.stored).flatMap(g => g.ids)
+    if (surplus.length) markForStorage(surplus)
+    askSaveRedesign()
+}
+
+/** Take back a storage mark: the piece returns to the tray. */
+function unmarkStorage(ids: string[]) {
+    const r = redesign.value
+    if (!r) return
+    r.toStore = r.toStore.filter(id => !ids.includes(id))
+    sound.play('click')
+}
+
+/** Keep the half-done layout on the server and leave; the town is untouched. */
+function saveRedesignDraft() {
+    const r = redesign.value
+    if (!r) return
+    run(() => town.saveRedesignDraft({ placed: r.placed, newRoads: r.newRoads, toStore: r.toStore }), () => {
+        redesign.value = null
+        clearSelection()
+        dropTrayPick()
+    }, 'place')
+}
+
+/** Throw the saved draft away and start the tray from the town as it stands. */
+async function discardDraft() {
+    await run(() => town.discardRedesignDraft(), () => {
+        if (redesign.value) redesign.value = { ...redesign.value, placed: {}, newRoads: {}, toStore: [] }
+        clearSelection()
+        dropTrayPick()
+    }, 'close')
+}
+
+function cancelRedesign() {
+    redesign.value = null
+    confirmRedesign.value = null
+    clearSelection()
+    dropTrayPick()
+    sound.play('close')
+}
+
+/** Put every piece back in the tray, storage marks included. */
+function pickUpAll() {
+    if (!redesign.value) return
+    redesign.value.placed = {}
+    redesign.value.newRoads = {}
+    redesign.value.toStore = []
+    clearSelection()
+    dropTrayPick()
+    sound.play('click')
+}
+
+function pickTray(key: string) {
+    if (!redesign.value) return
+    sound.play('click')
+    if (trayPick.value === key) { dropTrayPick(); return }
+    trayPick.value = key
+    ghostType.value = key === 'road' ? 'road' : trayGroups.value.find(g => g.key === key)?.type ?? null
+    ghostRotation.value = 0
+    movingId.value = null
+}
+
+/** A road on the cursor, whether or not one was already there. */
+function holdRoad() {
+    trayPick.value = 'road'
+    ghostType.value = 'road'
+    ghostRotation.value = 0
+    movingId.value = null
+}
+
+function dropTrayPick() {
+    trayPick.value = null
+    ghostType.value = null
+    movingId.value = null
+}
+
+/**
+ * Only the ground is judged while redesigning: a tile taken, water, or a wide
+ * footprint that would straddle two plots. The road def asks nothing else.
+ */
+function groundIssue(wx: number, wy: number, type = 'road', layout = simBuildings.value) {
+    const size = townBuildingSize(type)
+    return townPlacementIssue(layout, size > 1 ? { ...ROAD_DEF, size } : ROAD_DEF, wx, wy, 0)
+}
+
+/** Put the piece on the cursor down on this tile, or say why not. */
+function placeDraft(tile: { plotId: string, tileX: number, tileY: number }) {
+    const r = redesign.value
+    if (!r) return
+    if (!ghostType.value || !trayPick.value) {
+        toast.add({ title: 'Pick something from the tray first', color: 'neutral' })
+        return
+    }
+    const plot = plotById.value.get(tile.plotId)
+    if (!plot) return
+    const issue = groundIssue(plot.x * TOWN_PLOT_SIZE + tile.tileX, plot.y * TOWN_PLOT_SIZE + tile.tileY, ghostType.value)
+    if (issue) {
+        sound.play('error')
+        toast.add({ title: issue, color: 'warning' })
+        return
+    }
+    putDown(tile)
+    sound.play('place')
+}
+
+/** Consume one piece of the current pick onto a tile that has already been judged. */
+function putDown(tile: { plotId: string, tileX: number, tileY: number }, rotation = ghostRotation.value) {
+    const r = redesign.value
+    if (!r || !trayPick.value) return false
+    const spot: DraftSpot = { plotId: tile.plotId, tileX: tile.tileX, tileY: tile.tileY, rotation }
+    if (trayPick.value === 'road') {
+        // The town's own roads first, then stored ones, and only then a new one to pay for.
+        const id = trayRoads.value[0] ?? storedRoadsLeft.value[0]
+        if (id) r.placed[id] = { ...spot, rotation: 0 }
+        else r.newRoads[`new:${++newRoadSeq}`] = { ...spot, rotation: 0 }
+        return true
+    }
+    const group = trayGroups.value.find(g => g.key === trayPick.value)
+    const id = group?.ids[0]
+    if (!id) { dropTrayPick(); return false }
+    r.placed[id] = spot
+    // The last of its kind went down: the cursor is empty again.
+    if (group!.ids.length === 1) dropTrayPick()
+    return true
+}
+
+/** A drag while redesigning: each tile judged against the ones before it, like a fresh road run. */
+function planDraftTiles(cursorTiles: SceneTile[]) {
+    const tiles = cursorTiles.map(anchorTile)
+    const type = ghostType.value
+    const def = type ? getTownBuilding(type) : null
+    if (!def || !trayPick.value || tiles.length === 0) return []
+    const layout = [...simBuildings.value]
+    let left = trayPick.value === 'road' ? Infinity : (trayGroups.value.find(g => g.key === trayPick.value)?.ids.length ?? 0)
+    const out: { tile: SceneTile, rotation: number, ok: boolean, coins: number }[] = []
+    for (const tile of tiles) {
+        let rotation = ghostRotation.value
+        if (def.kind !== 'road' && !townFrontTiles(tile.wx, tile.wy, rotation, def.size ?? 1).some(f => townRoadAt(layout, f.wx, f.wy))) {
+            const auto = townAutoFacing(layout, tile.wx, tile.wy, def.size ?? 1)
+            if (auto !== null) rotation = auto
+        }
+        const ok = left > 0 && groundIssue(tile.wx, tile.wy, def.id, layout) === null
+        out.push({ tile, rotation, ok, coins: 0 })
+        if (ok) {
+            left--
+            layout.push({ id: `drag:${tile.wx},${tile.wy}`, type: def.id as TownSimBuilding['type'], level: 1, completesAt: 0, upgradingTo: null, createdAt: 0, wx: tile.wx, wy: tile.wy, rotation })
+        }
+    }
+    return out
+}
+
+function placeDraftLine(tiles: SceneTile[]) {
+    const plan = planDraftTiles(tiles).filter(p => p.ok)
+    dragTiles.value = []
+    if (plan.length === 0) {
+        sound.play('error')
+        toast.add({ title: 'Nothing could go there', color: 'warning' })
+        return
+    }
+    let n = 0
+    for (const p of plan) if (putDown(p.tile, p.rotation)) n++
+    if (n) sound.play('place')
+}
+
+/** Click a piece that is down: it goes back on the cursor, ready to be put somewhere else. */
+function pickUpDraft(id: string) {
+    const r = redesign.value
+    if (!r) return
+    sound.play('click')
+    if (id.startsWith('new:')) {
+        const { [id]: _road, ...rest } = r.newRoads
+        r.newRoads = rest
+        holdRoad()
+        return
+    }
+    const stored = r.stored.find(x => x.id === id)
+    const b = r.original.find(x => x.id === id) ?? stored
+    const spot = r.placed[id]
+    if (!b || !spot) return
+    const { [id]: _spot, ...rest } = r.placed
+    r.placed = rest
+    if (b.type === 'road') { holdRoad(); return }
+    trayPick.value = trayKey(b, !!stored)
+    ghostType.value = b.type
+    ghostRotation.value = spot.rotation
+    movingId.value = null
+}
+
+/** Every selected piece goes back in the tray. */
+function liftSelection() {
+    const r = redesign.value
+    if (!r || selectedIds.value.length === 0) return
+    const ids = new Set(selectedIds.value)
+    r.placed = Object.fromEntries(Object.entries(r.placed).filter(([id]) => !ids.has(id)))
+    r.newRoads = Object.fromEntries(Object.entries(r.newRoads).filter(([id]) => !ids.has(id)))
+    selectedIds.value = []
+    moveSelection.value = null
+    sound.play('click')
+}
+
+function askSaveRedesign() {
+    const r = redesign.value
+    if (!r) return
+    // Pieces still in the tray: keep the draft for later, the town stays as it is.
+    if (redesignIsDraft.value) { saveRedesignDraft(); return }
+    if (redesignSaveIssue.value) return
+    const fromStorage = new Set(draftFromStorage.value)
+    sound.play('open')
+    confirmRedesign.value = {
+        moves: Object.entries(r.placed).filter(([id]) => !fromStorage.has(id)).map(([, s]) => s),
+        roads: Object.values(r.newRoads),
+        // Roads left in the tray are kept, not demolished.
+        store: [...r.toStore, ...trayRoads.value],
+        place: draftFromStorage.value
+    }
+}
+
+function saveRedesign() {
+    const r = redesign.value
+    if (!r) return
+    const fromStorage = new Set(draftFromStorage.value)
+    const spots: TownSpot[] = Object.entries(r.placed).map(([buildingId, s]) => ({ buildingId, ...s }))
+    const moves = spots.filter(s => !fromStorage.has(s.buildingId))
+    const place = spots.filter(s => fromStorage.has(s.buildingId))
+    const roads = Object.values(r.newRoads).map(s => ({ plotId: s.plotId, tileX: s.tileX, tileY: s.tileY }))
+    const store = [...r.toStore, ...trayRoads.value]
+    confirmRedesign.value = null
+    run(() => town.redesign(moves, roads, store, place), () => {
+        redesign.value = null
+        clearSelection()
+        dropTrayPick()
+    }, 'place')
+}
+
+// ── Actions ──
+async function run<T>(fn: () => Promise<T>, onOk?: (res: T) => void, sfx?: Parameters<typeof sound.play>[0]) {
+    if (busy.value) return
+    busy.value = true
+    sound.unlock()
+    try {
+        const res = await fn()
+        if (sfx) sound.play(sfx)
+        onOk?.(res)
+    } catch {
+        sound.play('error')
+    } finally {
+        busy.value = false
+    }
+}
+
+/**
+ * An action the town shows before the server answers: the sound plays now and
+ * the next click is free at once. A failure is undone by the town and knocks.
+ */
+function fire(fn: () => Promise<unknown>, sfx?: Parameters<typeof sound.play>[0], onFail?: () => void) {
+    sound.unlock()
+    if (sfx) sound.play(sfx)
+    fn().catch(() => {
+        sound.play('error')
+        onFail?.()
+    })
+}
+
+/** Put a selection back after a store or demolish that failed, keeping only what is still on the map. */
+function restoreSelection(ids: string[], single: string | null) {
+    const alive = new Set(town.buildings.value.map(b => b.id))
+    selectedIds.value = [...new Set([...selectedIds.value, ...ids.filter(id => alive.has(id))])]
+    if (single && alive.has(single) && !selectedBuildingId.value) selectedBuildingId.value = single
+}
+
+// Selected building details.
+const selDef = computed(() => selectedEntry.value ? getTownBuilding(selectedEntry.value.id) ?? null : null)
+const selPending = computed(() => !!selectedBuilding.value && selectedBuilding.value.completesAt > now.value && (selectedBuilding.value.level === 0 || selectedBuilding.value.upgradingTo !== null))
+const selRemaining = computed(() => selectedBuilding.value ? Math.max(0, selectedBuilding.value.completesAt - now.value) : 0)
+const selRushGems = computed(() => townRushGemCost(selRemaining.value))
+const selNextLevel = computed(() => (selectedBuilding.value?.level ?? 0) + 1)
+/** A park never needs level 20, so the cap is per building, not global. */
+const selMaxLevel = computed(() => selectedEntry.value?.maxLevel ?? town.constants.value.maxLevel)
+const selCanUpgrade = computed(() => !!selectedBuilding.value && !selPending.value && selectedBuilding.value.level > 0 && selectedBuilding.value.level < selMaxLevel.value)
+const selUpgradeCost = computed(() => selDef.value ? townLevelCost(selDef.value, selNextLevel.value) : { coins: 0, resources: {} })
+// The server quotes this: only it knows the town's mood and its monuments.
+const selUpgradeMs = computed(() => boostedMs(selectedBuilding.value?.nextUpgradeMs ?? 0))
+/** Residents this building wants. Warehouses want them too, not just workshops. */
+const selWorkersWanted = computed(() => selDef.value && selectedBuilding.value
+    ? townWorkersFor(selDef.value, selectedBuilding.value.level)
+    : 0)
+/** The workers meter's tooltip: what this building wants, and what its road network has. */
+const selWorkersTitle = computed(() => {
+    const b = selectedBuilding.value
+    const d = b?.district
+    const want = `Wants ${selWorkersWanted.value} ${selWorkersWanted.value === 1 ? 'resident' : 'residents'}`
+    if (!d) return want
+    return `${want}\nThis road network: ${d.residents} residents for ${d.jobs} jobs.`
+})
+/** Why this building is short of hands, when the roads are the reason. */
+const selDistrictFix = computed(() => {
+    const b = selectedBuilding.value
+    const e = selectedEntry.value
+    const d = b?.district
+    if (!b || !e || !d || b.connected === false || b.completesAt > now.value) return null
+    if (e.kind === 'housing') {
+        return d.jobs === 0 ? 'Nobody here can reach a job. Join this road to your workshops.' : null
+    }
+    if (e.kind === 'road' || selWorkersWanted.value === 0 || (b.staffing ?? 0) >= 0.99) return null
+    if (d.residents === 0) return 'No homes on this road network. Build houses along it, or join it to your town by road.'
+    if (d.residents < d.jobs) return `This road network has ${d.residents} residents for ${d.jobs} jobs. Add houses along it, or join it to more of your town.`
+    return null
+})
+/** The next rung that will start demanding a good from further up the chain. */
+
+const plotById = computed(() => new Map(town.plots.value.map(p => [p.id, p])))
+const simBuildings = computed<TownSimBuilding[]>(() => sceneBuildings.value.map((b) => {
+    const plot = plotById.value.get(b.plotId)
+    return {
+        id: b.id,
+        type: b.type as TownSimBuilding['type'],
+        level: b.level,
+        completesAt: b.completesAt,
+        upgradingTo: b.upgradingTo,
+        createdAt: b.createdAt,
+        wx: plot ? plot.x * TOWN_PLOT_SIZE + b.tileX : undefined,
+        wy: plot ? plot.y * TOWN_PLOT_SIZE + b.tileY : undefined,
+        rotation: b.rotation
+    }
+}))
+const selAdjacency = computed(() => {
+    const b = selectedBuilding.value
+    if (!b || b.type !== 'house') return null
+    const plot = plotById.value.get(b.plotId)
+    if (!plot) return null
+    return houseAdjacency(simBuildings.value, plot.x * TOWN_PLOT_SIZE + b.tileX, plot.y * TOWN_PLOT_SIZE + b.tileY)
+})
+
+/** Why the ghost cannot go on a tile, from the same rules the server enforces. */
+function placementIssueAt(tile: { wx: number, wy: number }): string | null {
+    if (!ghostType.value) return null
+    const def = getTownBuilding(ghostType.value)
+    if (!def) return null
+    // Placement only checks the ground; a disconnected building stays idle.
+    if (redesign.value) return groundIssue(tile.wx, tile.wy, def.id)
+    if (movingId.value) return townGroupMoveIssue(simBuildings.value, [{ id: movingId.value, wx: tile.wx, wy: tile.wy, rotation: ghostRotation.value }])
+    // Out of storage costs nothing; only the ground, and a crew for a paused job.
+    if (placingStored.value) return townPlacementIssue(simBuildings.value, def, tile.wx, tile.wy, ghostRotation.value) ?? storedCrewIssue(placingStored.value)
+    return townPlacementIssue(simBuildings.value, def, tile.wx, tile.wy, ghostRotation.value) ?? (redesign.value ? null : ghostBlocker.value)
+}
+
+/** The server's word for a build with no crew free; the one blocker a rush gets past. */
+const NO_CREWS = 'Every builder is busy'
+
+/** What the next one costs to put down: free while research carries a monument over. */
+const ghostCost = computed(() => {
+    const type = ghostType.value
+    if (!type || movingId.value || placingStored.value || redesign.value) return null
+    const entry = town.catalogById.value.get(type)
+    if (!entry) return null
+    if (monumentCredit(type)) return { coins: 0, resources: {} as Record<string, number> }
+    return town.nextCost.value[type] ?? entry.cost
+})
+
+/**
+ * Why no tile at all would take the held building right now (crews, coins,
+ * the town's cap), so the ghost turns red before the click, not after.
+ */
+const ghostBlocker = computed<string | null>(() => {
+    const type = ghostType.value
+    const cost = ghostCost.value
+    const entry = type ? town.catalogById.value.get(type) : null
+    if (!type || !cost || !entry) return null
+    const capped = countIssue(type)
+    if (capped) return capped
+    if (entry.kind === 'monument') {
+        if (!monumentCredit(type) && monumentCrewNote.value) return monumentCrewNote.value
+    } else if (entry.kind !== 'road' && buildersFree.value === 0) {
+        return NO_CREWS
+    }
+    if (balance.value < cost.coins) return 'Not enough coins'
+    for (const [id, q] of Object.entries(cost.resources)) {
+        if ((town.inventory.value[id] ?? 0) < q) return `Not enough ${town.resourceById.value.get(id)?.name.toLowerCase() ?? id}`
+    }
+    return null
+})
+
+const ghostIssue = computed<string | null>(() => hoveredTile.value ? placementIssueAt(hoveredTile.value) : null)
+
+// ── Drag placement ──────────────────────────────────────────────────────────
+// A drag paints a run of tiles. Each one is judged against the layout the tiles
+// before it in the same drag would create, so a street connects to itself and
+// the pads on the ground read exactly as the server will decide.
+
+function planTiles(cursorTiles: SceneTile[]) {
+    const tiles = cursorTiles.map(anchorTile)
+    const type = ghostType.value
+    const def = type ? getTownBuilding(type) : null
+    if (!def || tiles.length === 0) return []
+    const layout = movingId.value ? simBuildings.value.filter(b => b.id !== movingId.value) : [...simBuildings.value]
+    const counts = new Map<string, number>()
+    for (const b of layout) counts.set(b.type, (counts.get(b.type) ?? 0) + 1)
+    // What the drag has left to spend, so the pads stop where the server will.
+    let coinsLeft = balance.value
+    const goodsLeft: Record<string, number> = { ...town.inventory.value }
+    // Every building but a road takes a crew, so the pads stop when they run out.
+    const needsCrew = def.kind !== 'road' && def.kind !== 'monument'
+    let crewsLeft = buildersFree.value
+    const out: { tile: SceneTile, rotation: number, ok: boolean, coins: number }[] = []
+    for (const tile of tiles) {
+        let rotation = ghostRotation.value
+        if (def.kind !== 'road' && !townFrontTiles(tile.wx, tile.wy, rotation, def.size ?? 1).some(f => townRoadAt(layout, f.wx, f.wy))) {
+            const auto = townAutoFacing(layout, tile.wx, tile.wy, def.size ?? 1)
+            if (auto !== null) rotation = auto
+        }
+        let ok = townPlacementIssue(layout, def, tile.wx, tile.wy, rotation) === null
+            && townBuildingCountIssue(def, counts.get(def.id) ?? 0) === null
+            && (!needsCrew || crewsLeft > 0)
+        const cost = townPlaceCost(def, counts.get(def.id) ?? 0)
+        if (ok && (cost.coins > coinsLeft || Object.entries(cost.resources).some(([id, q]) => (goodsLeft[id] ?? 0) < q))) ok = false
+        const coins = ok ? cost.coins : 0
+        out.push({ tile, rotation, ok, coins })
+        if (ok) {
+            if (needsCrew) crewsLeft--
+            coinsLeft -= cost.coins
+            for (const [id, q] of Object.entries(cost.resources)) goodsLeft[id] = (goodsLeft[id] ?? 0) - q
+            counts.set(def.id, (counts.get(def.id) ?? 0) + 1)
+            layout.push({
+                id: `drag:${tile.wx},${tile.wy}`,
+                type: def.id as TownSimBuilding['type'],
+                level: def.kind === 'road' ? 1 : 0,
+                completesAt: 0,
+                upgradingTo: null,
+                createdAt: 0,
+                wx: tile.wx,
+                wy: tile.wy,
+                rotation
+            })
+        }
+    }
+    return out
+}
+
+const dragPlan = computed(() => redesign.value ? planDraftTiles(dragTiles.value) : planTiles(dragTiles.value))
+const dragValid = computed(() => dragPlan.value.map(p => p.ok))
+/** What the drag under the cursor would cost, for the strip along the top. */
+const dragQuote = computed(() => {
+    const usable = dragPlan.value.filter(p => p.ok)
+    if (usable.length < 2) return null
+    return { count: usable.length, coins: usable.reduce((sum, p) => sum + p.coins, 0) }
+})
+
+function onDragTiles(tiles: SceneTile[]) {
+    const grew = tiles.length > dragTiles.value.length
+    dragTiles.value = tiles
+    // The first tile is every plain click too; only a run that grows ticks.
+    if (!grew || tiles.length < 2) return
+    // Each tile the run takes ticks a semitone higher, up to two octaves; a
+    // tile it cannot take knocks low instead.
+    const plan = dragPlan.value
+    const ok = plan.filter(p => p.ok).length
+    if (plan[plan.length - 1]?.ok === false) sound.play('tick', 0.5)
+    else sound.play('tick', Math.pow(2, Math.min(24, Math.max(0, ok - 1)) / 12))
+}
+
+/**
+ * A drag let go. The tiles come with the event rather than from `dragTiles`:
+ * the scene clears that as it releases, so reading the ref here would plan an
+ * empty run and build nothing.
+ */
+function onPlaceLine(tiles: SceneTile[]) {
+    if (!ghostType.value || busy.value) return
+    if (redesign.value) { placeDraftLine(tiles); return }
+    // A relocation is one building by definition — the drag only ever adds.
+    if (movingId.value || placingStored.value) { dragTiles.value = []; return }
+    const plan = planTiles(tiles).filter(p => p.ok)
+    dragTiles.value = []
+    if (plan.length === 0) {
+        sound.play('error')
+        toast.add({ title: 'Nothing could go there', color: 'warning' })
+        return
+    }
+    const type = ghostType.value
+    const items = plan.map(p => ({ plotId: p.tile.plotId, tileX: p.tile.tileX, tileY: p.tile.tileY, type, rotation: p.rotation }))
+    fire(() => town.placeBuildings(items.slice(0, TOWN_MAX_DRAG_TILES)), type === 'road' ? 'road' : 'place')
+    if (ghostType.value === type && countIssue(type)) ghostType.value = null
+}
+
+// ── Selection ───────────────────────────────────────────────────────────────
+
+const selectedBuildings = computed(() => sceneBuildings.value.filter(b => selectedIds.value.includes(b.id)))
+/** The selection's upgradeable members, and what starting them all would cost. */
+const selectionUpgradable = computed(() => selectedBuildings.value.filter((b) => {
+    const entry = town.catalogById.value.get(b.type)
+    const def = getTownBuilding(b.type)
+    if (!entry || !def || entry.kind === 'road') return false
+    if (b.level === 0 || b.upgradingTo !== null) return false
+    return b.level < (entry.maxLevel ?? town.constants.value.maxLevel)
+}))
+
+function onSelectMany(ids: string[], mode: 'replace' | 'add' | 'toggle') {
+    sound.unlock()
+    // While the town is in the tray a band gathers placed pieces to move or
+    // lift as a block; a single piece is still lifted by clicking it.
+    if (redesign.value) {
+        moveSelection.value = null
+        selectedIds.value = mode === 'replace' ? ids : [...new Set([...selectedIds.value, ...ids])]
+        selectedBuildingId.value = null
+        if (selectedIds.value.length) { dropTrayPick(); sound.play('click') }
+        return
+    }
+    // A plain click leaves its building in selectedBuildingId only; a shift-click
+    // on top of it should grow from there, not start over.
+    const base = selectedIds.value.length ? selectedIds.value : selectedBuildingId.value ? [selectedBuildingId.value] : []
+    let all: string[]
+    if (mode === 'replace') all = ids
+    else if (mode === 'add') all = [...new Set([...base, ...ids])]
+    else {
+        const have = new Set(base)
+        const allIn = ids.every(id => have.has(id))
+        all = allIn ? base.filter(id => !ids.includes(id)) : [...new Set([...base, ...ids])]
+    }
+    // A selection change while a block is on the cursor puts the block down.
+    moveSelection.value = null
+    // One bulk call is capped server-side, so the selection is capped here — a
+    // band over three plots must not gather a block that can never be acted on.
+    const next = all.slice(0, TOWN_MAX_DRAG_TILES)
+    if (all.length > next.length) toast.add({ title: `Selection capped at ${TOWN_MAX_DRAG_TILES}`, color: 'warning' })
+    selectedIds.value = next
+    // A band that caught nothing only clears the selection; a ghost being
+    // carried survives it, so a road drag that starts off the plot is not lost.
+    if (next.length) {
+        ghostType.value = null
+        movingId.value = null
+    }
+    if (next.length === 1) {
+        selectedBuildingId.value = next[0]!
+        buildOpen.value = false
+    } else {
+        selectedBuildingId.value = null
+        if (next.length) { buildOpen.value = false; windowOpen.value = null }
+    }
+    if (next.length) sound.play('click')
+}
+
+function clearSelection() {
+    selectedIds.value = []
+    moveSelection.value = null
+}
+
+/** The Delete key or the toolbar's Demolish on a selection. */
+const confirmBulk = ref<{ ids: string[] } | null>(null)
+function demolishMany(all: string[]) {
+    // Monuments stand for good, so a band that caught one leaves it be.
+    const ids = all.filter(id => !getTownMonument(sceneBuildings.value.find(b => b.id === id)?.type ?? ''))
+    if (ids.length === 0) return
+    sound.unlock()
+    confirmBulk.value = { ids }
+}
+function demolishBulk() {
+    const ids = confirmBulk.value?.ids ?? []
+    confirmBulk.value = null
+    if (ids.length === 0) return
+    const before = { ids: selectedIds.value.filter(id => ids.includes(id)), single: selectedBuildingId.value }
+    fire(() => town.demolishBuildings(ids), 'demolish', () => restoreSelection(before.ids, before.single))
+    selectedIds.value = selectedIds.value.filter(id => !ids.includes(id))
+    if (selectedBuildingId.value && ids.includes(selectedBuildingId.value)) selectedBuildingId.value = null
+}
+
+function upgradeSelection() {
+    const ids = selectionUpgradable.value.map(b => b.id)
+    if (ids.length === 0) return
+    fire(() => town.upgradeBuildings(ids), 'upgrade')
+}
+
+// ── Group move ──────────────────────────────────────────────────────────────
+
+function plotAt(wx: number, wy: number) {
+    const px = Math.floor(wx / TOWN_PLOT_SIZE)
+    const py = Math.floor(wy / TOWN_PLOT_SIZE)
+    return town.plots.value.find(p => p.x === px && p.y === py) ?? null
+}
+
+/** Pick the whole selection up, laid out around the top-left member. */
+function startGroupMove() {
+    const list = selectedBuildings.value
+    if (list.length === 0) return
+    const tiles = list.map((b) => {
+        const plot = plotById.value.get(b.plotId)
+        return { b, wx: (plot?.x ?? 0) * TOWN_PLOT_SIZE + b.tileX, wy: (plot?.y ?? 0) * TOWN_PLOT_SIZE + b.tileY }
+    })
+    const ax = Math.min(...tiles.map(t => t.wx))
+    const ay = Math.min(...tiles.map(t => t.wy))
+    moveSelection.value = {
+        items: tiles.map(t => ({ id: t.b.id, type: t.b.type, level: Math.max(1, t.b.level), rotation: t.b.rotation, dx: t.wx - ax, dy: t.wy - ay }))
+    }
+    ghostType.value = null
+    movingId.value = null
+    trayPick.value = null
+    selectedBuildingId.value = null
+    buildOpen.value = false
+    sound.play('pickup')
+}
+
+const moveGhosts = computed(() => moveSelection.value?.items ?? null)
+/** Where every member of the carried selection would land if its anchor sat on (wx, wy). */
+function groupTargetsAt(wx: number, wy: number) {
+    const sel = moveSelection.value
+    if (!sel) return null
+    return sel.items.map(i => ({ id: i.id, wx: wx + i.dx, wy: wy + i.dy, rotation: i.rotation }))
+}
+function groupIssueFor(targets: ReturnType<typeof groupTargetsAt>) {
+    if (!targets) return null
+    for (const t of targets) if (!plotAt(t.wx, t.wy)) return 'Keep the whole block on your own land'
+    return townGroupMoveIssue(simBuildings.value, targets)
+}
+/** The verdict on the tile under the cursor, for the ghosts' tint. */
+const moveIssue = computed(() => {
+    const tile = hoveredTile.value
+    return tile ? groupIssueFor(groupTargetsAt(tile.wx, tile.wy)) : null
+})
+
+function rotateGroup(dir: 1 | -1 = 1) {
+    const sel = moveSelection.value
+    if (!sel) return
+    // The whole block turns a quarter clockwise about the tile under the cursor,
+    // every building turning with it, so a street with houses along it comes
+    // down as the same street facing the other way. The offset map is the same
+    // one TOWN_FACING follows, which is what keeps every door on its road.
+    // Shift turns it back the other way: the exact inverse of that map.
+    sel.items = dir === 1
+        ? sel.items.map(i => ({ ...i, dx: i.dy, dy: -i.dx, rotation: (i.rotation + 1) % 4 }))
+        : sel.items.map(i => ({ ...i, dx: -i.dy, dy: i.dx, rotation: (i.rotation + 3) % 4 }))
+    sound.play('rotate')
+}
+
+/**
+ * Drop the block with its anchor on the tile that was clicked. The tile comes
+ * from the click itself rather than the hover state: a tap has no hover, so a
+ * touch player could otherwise never put a selection down.
+ */
+async function commitGroupMove(tile: { plotId: string, tileX: number, tileY: number }) {
+    const plot = plotById.value.get(tile.plotId)
+    if (!plot) return
+    const targets = groupTargetsAt(plot.x * TOWN_PLOT_SIZE + tile.tileX, plot.y * TOWN_PLOT_SIZE + tile.tileY)
+    if (!targets) return
+    const issue = groupIssueFor(targets)
+    if (issue) {
+        // A carried block shows no reason over the cursor, so it always says why.
+        denyPlacement(issue, null)
+        return
+    }
+    const moves = targets.map((t) => {
+        const plot = plotAt(t.wx, t.wy)!
+        return { buildingId: t.id, plotId: plot.id, tileX: t.wx - plot.x * TOWN_PLOT_SIZE, tileY: t.wy - plot.y * TOWN_PLOT_SIZE, rotation: t.rotation }
+    })
+    if (redesign.value) {
+        const r = redesign.value
+        for (const m of moves) {
+            const spot: DraftSpot = { plotId: m.plotId, tileX: m.tileX, tileY: m.tileY, rotation: m.rotation }
+            if (m.buildingId.startsWith('new:')) r.newRoads[m.buildingId] = spot
+            else r.placed[m.buildingId] = spot
+        }
+        moveSelection.value = null
+        selectedIds.value = []
+        sound.play('place')
+        return
+    }
+    fire(() => town.moveBuildings(moves), 'place')
+    moveSelection.value = null
+}
+
+/** What the selected industry building does to the neighbourhood. */
+const selNuisance = computed(() => {
+    const b = selectedBuilding.value
+    const def = selDef.value
+    if (!b || !def || def.kind !== 'industry') return null
+    const plot = plotById.value.get(b.plotId)
+    if (!plot) return null
+    const { radius, penalty } = townIndustryNuisance(def)
+    const homes = townHousesWithin(simBuildings.value, plot.x * TOWN_PLOT_SIZE + b.tileX, plot.y * TOWN_PLOT_SIZE + b.tileY, radius)
+    return { radius, penalty, homes, perHome: penalty * TOWN_INDUSTRY_PENALTY_SCALE }
+})
+
+/** How well the selected workshop's inputs reach it — null unless it consumes goods. */
+const selSupply = computed(() => selectedBuilding.value?.supply ?? null)
+/**
+ * The deliveries feeding the selected workshop, each with the road it travels.
+ * The server says who supplies whom and what survives the trip; the route
+ * itself is walked here, because the client already holds the road layout and
+ * shipping a path per link in every state response would be most of the
+ * payload for something only the selected building ever draws.
+ *
+ * The label is written here too — resource names and number formatting live on
+ * this side, and the scene should not need either.
+ */
+const supplyRoutes = computed(() => {
+    const links = selSupply.value?.links
+    const sel = selectedBuilding.value
+    if (!links?.length || !sel) return []
+    const out: { producerId: string, path: { wx: number, wy: number }[], label: string }[] = []
+    for (const link of links) {
+        const path = townSupplyPath(simBuildings.value, link.producerId, sel.id, town.serverNow())
+        // No path means the layout moved under a state response still in
+        // flight; drawing a straight line through the houses would be a lie.
+        if (!path.length) continue
+        const name = town.resourceById.value.get(link.resource)?.name ?? link.resource
+        const pct = Math.round(link.efficiency * 100)
+        // Stops, not tiles. The route draws both front doors and everything
+        // between, so a trip the allocator calls 11 tiles is 12 markers on the
+        // ground — and a mayor counting them should land on the same number.
+        const stops = `${path.length} ${path.length === 1 ? 'stop' : 'stops'}`
+        // Per hour like every other rate on screen; the allocator's per-tick
+        // figures are an implementation detail (see perHour).
+        const unit: 'h' | 'day' = link.sent * ticksPerHour.value < 1 ? 'day' : 'h'
+        const per = unit === 'day' ? '/day' : '/h'
+        const sent = ioRate(link.sent, unit)
+        const lands = ioRate(link.sent * link.efficiency, unit)
+        out.push({
+            producerId: link.producerId,
+            path,
+            label: pct >= 100
+                ? `${name} · ${stops} · ${sent}${per}, all of it arrives`
+                : `${name} · ${stops} · ${sent}${per} sent, ${lands}${per} arrives (${pct}%)`
+        })
+    }
+    return out
+})
+/** Per-hour rate the building really runs at: recipe × level × throughput. */
+const selUnit = computed(() => selectedEntry.value ? ioUnit(selectedEntry.value) : 'h')
+function selRate(perLevel: number) {
+    const b = selectedBuilding.value
+    if (!b) return '0'
+    return ioRate(perLevel * b.level * (b.throughput ?? 1), selUnit.value)
+}
+/** The selected building's monument, when it is one. */
+const selMonument = computed(() => selectedBuilding.value ? getTownMonument(selectedBuilding.value.type) ?? null : null)
+/** What the selected monument gives now, in words. */
+const selMonumentNow = computed(() => selMonument.value && selectedBuilding.value ? townBonusLines(townMonumentEffect(selMonument.value, selectedBuilding.value.level)) : [])
+/** Hovering Upgrade swaps the cost for what the next level changes. */
+const previewUpgrade = ref(false)
+/** Before → after for the next level, at today's staffing and supply. */
+const selUpgradePreview = computed(() => {
+    const b = selectedBuilding.value
+    const e = selectedEntry.value
+    if (!b || !e || e.kind === 'road') return []
+    const next = b.level + 1
+    const rows: { id?: string, ico?: string, label: string, from: string, to: string, up: boolean, tip?: string }[] = []
+    if (selMonument.value) {
+        // One line per perk the next stage adds: what the town has, and what it will have.
+        const gained = selMonument.value.stages[b.level] ?? {}
+        const before = townMonumentEffect(selMonument.value, b.level)
+        const after = townMonumentEffect(selMonument.value, next)
+        for (const key of Object.keys(gained) as (keyof typeof gained)[]) {
+            rows.push({ ico: 'i-lucide-landmark', label: townBonusLabel(key), from: before[key] ? townBonusValue(key, before[key]) : '0', to: townBonusValue(key, after[key] ?? 0), up: true })
+        }
+        return rows
+    }
+    if (e.kind === 'industry') {
+        const rate = (q: number, level: number) => ioRate(q * level * (b.throughput ?? 1), selUnit.value)
+        for (const [id, q] of Object.entries(e.outputs)) {
+            rows.push({ id, label: '', from: `+${rate(q, b.level)}`, to: `+${rate(q, next)}`, up: true, tip: town.resourceById.value.get(id)?.name })
+        }
+        for (const [id, q] of Object.entries(e.inputs)) {
+            rows.push({ id, label: '', from: `−${rate(q, b.level)}`, to: `−${rate(q, next)}`, up: false, tip: town.resourceById.value.get(id)?.name })
+        }
+    } else if (e.kind === 'housing') {
+        rows.push({ ico: 'i-lucide-users', label: 'residents', from: String(e.popCap * b.level), to: String(e.popCap * next), up: true })
+    } else if (e.kind === 'civic') {
+        // Past the per-home ceiling another level cheers nobody, so say nothing.
+        const cheer = (level: number) => Math.min(town.constants.value.houseCheerMax, townCivicCheer(getTownBuilding(e.id)!, level))
+        if (cheer(next) > cheer(b.level)) rows.push({ ico: 'i-lucide-smile', label: 'per home in reach', from: `+${cheer(b.level)}`, to: `+${cheer(next)}`, up: true, tip: `A home gains at most +${town.constants.value.houseCheerMax} from all the parks around it.` })
+    } else if (e.kind === 'storage') {
+        rows.push({ ico: 'i-lucide-package', label: 'storage', from: formatNumber(e.storage * b.level), to: formatNumber(e.storage * next), up: true })
+    }
+    if (selDef.value) {
+        const want = townWorkersFor(selDef.value, b.level)
+        const wantNext = townWorkersFor(selDef.value, next)
+        if (wantNext !== want) rows.push({ ico: 'i-lucide-users', label: 'wanted', from: String(want), to: String(wantNext), up: false, tip: 'Residents it will want. Short-handed buildings run slower.' })
+    }
+    return rows
+})
+/** The supply tag's tooltip: the rule once, then a line per input good. */
+const selSupplyTitle = computed(() => {
+    const s = selSupply.value
+    if (!s) return ''
+    const lines = []
+    for (const i of s.inputs) {
+        const name = town.resourceById.value.get(i.resource)?.name ?? i.resource
+        const where = i.nearestTiles === null ? 'no supplier' : `${i.nearestTiles} road ${i.nearestTiles === 1 ? 'tile' : 'tiles'} away`
+        lines.push(`${name} ${Math.round(i.ratio * 100)}% · ${where}`)
+    }
+    return lines.join('\n')
+})
+/** The starved input and the building that would feed it — only when there is something to build. */
+const selSupplyFix = computed(() => {
+    const s = selSupply.value
+    if (!s) return null
+    const c = town.constants.value
+    const worst = s.inputs.reduce<typeof s.inputs[number] | null>((w, i) => !w || i.ratio < w.ratio ? i : w, null)
+    if (!worst || worst.ratio > c.supplyMinEfficiency + 0.05) return null
+    const maker = town.catalog.value.find(e => Object.keys(e.outputs).includes(worst.resource))
+    if (!maker || !town.unlockedTiers.value.has(maker.tier)) return null
+    return { resource: worst.resource, name: town.resourceById.value.get(worst.resource)?.name ?? worst.resource, maker: maker.name, tiles: c.supplyFullTiles }
+})
+
+function upgradeSelected() {
+    const b = selectedBuilding.value
+    if (!b) return
+    if (selMonument.value) {
+        if (monumentCrewNote.value) { toast.add({ title: monumentCrewNote.value, color: 'warning' }); return }
+    } else if (buildersFree.value === 0) { openBlocked({ kind: 'upgrade', buildingId: b.id }); return }
+    fire(() => town.upgradeBuilding(b.id), 'upgrade')
+}
+function rushSelected() {
+    const b = selectedBuilding.value
+    if (!b) return
+    run(() => town.rushBuilding(b.id), undefined, 'rush')
+}
+const confirmDemolish = ref(false)
+function demolishSelected() {
+    const b = selectedBuilding.value
+    if (!b) return
+    confirmDemolish.value = false
+    fire(() => town.demolishBuilding(b.id), 'demolish', () => restoreSelection([], b.id))
+    selectedBuildingId.value = null
+}
+
+function found() {
+    run(() => town.foundTown(), () => {
+        nextTick(() => sceneRef.value?.recenter())
+    }, 'plot')
+}
+
+// ── Land ──
+const plotPurchase = computed(() => town.state.value?.plotPurchase ?? null)
+const plotRemainingMs = computed(() => plotPurchase.value ? Math.max(0, plotPurchase.value.availableAt - now.value) : 0)
+const plotAffordable = computed(() => !!plotPurchase.value && balance.value >= plotPurchase.value.price)
+const canBuyPlot = computed(() => !!plotPurchase.value && !plotPurchase.value.maxed && plotRemainingMs.value <= 0 && plotAffordable.value)
+const expansionLabel = computed(() => {
+    const p = plotPurchase.value
+    if (!p) return ''
+    if (p.maxed) return 'Maximum plots owned'
+    if (plotRemainingMs.value > 0) return `FOR SALE\nOpens in ${formatTownDuration(plotRemainingMs.value)}`
+    return `FOR SALE\n${formatNumber(p.price)} coins${plotAffordable.value ? '' : ' · not enough'}`
+})
+
+const confirmPlot = ref<{ x: number, y: number } | null>(null)
+function buyPlot(slot: { x: number, y: number }) {
+    if (!plotPurchase.value) return
+    if (plotPurchase.value.maxed) { toast.add({ title: 'You own the maximum number of plots', color: 'warning' }); return }
+    if (plotRemainingMs.value > 0) { toast.add({ title: 'Land office closed', description: `Opens in ${formatTownDuration(plotRemainingMs.value)}`, color: 'warning' }); return }
+    if (!plotAffordable.value) { toast.add({ title: 'Not enough coins', color: 'error' }); sound.play('error'); return }
+    sound.play('open')
+    confirmPlot.value = slot
+}
+function confirmBuyPlot() {
+    const slot = confirmPlot.value
+    confirmPlot.value = null
+    if (!slot) return
+    run(() => town.buyPlot(slot.x, slot.y), undefined, 'plot')
+}
+
+// ── Land ──
+const buildingsOnPlot = computed(() => {
+    const counts: Record<string, number> = {}
+    for (const b of town.buildings.value) counts[b.plotId] = (counts[b.plotId] ?? 0) + 1
+    return counts
+})
+const listingPrices = ref<Record<string, string>>({})
+/** Only bare land can change hands, so those are the only rows worth listing. */
+const emptyPlots = computed(() => town.plots.value.filter(p => !buildingsOnPlot.value[p.id]))
+const confirmListing = ref<{ id: string, ownerName: string, price: number } | null>(null)
+
+function onSelectListing(listing: { id: string, ownerName: string, price: number }) {
+    sound.unlock()
+    sound.play('open')
+    confirmListing.value = listing
+}
+
+function buyListing() {
+    const listing = confirmListing.value
+    confirmListing.value = null
+    if (!listing) return
+    run(() => town.buyPlotFromPlayer(listing.id, listing.price), undefined, 'plot')
+}
+
+function listPlotForSale(plotId: string) {
+    const price = parseAmount(listingPrices.value[plotId] ?? '')
+    if (!price || price < 1) { toast.add({ title: 'Set an asking price first', color: 'warning' }); return }
+    run(() => town.listPlot(plotId, price), undefined, 'click')
+}
+
+function unlistPlot(plotId: string) {
+    run(() => town.listPlot(plotId, null), undefined, 'close')
+}
+
+const confirmSellPlot = ref<string | null>(null)
+const sellPlotRefund = computed(() => town.plots.value.find(p => p.id === confirmSellPlot.value)?.refund ?? 0)
+function sellPlotBack() {
+    const plotId = confirmSellPlot.value
+    confirmSellPlot.value = null
+    if (!plotId) return
+    run(() => town.sellPlot(plotId), undefined, 'coin')
+}
+
+// ── Market ──
+function openMarket(resource?: string) {
+    if (resource) marketResource.value = resource
+    if (windowOpen.value !== 'market') openWindow('market')
+}
+/**
+ * Where a gain should burst from: the button just pressed (or the card it
+ * sits in), read before the request so a button that vanishes still counts.
+ */
+function pressedAt(closest?: string): DOMRect | null {
+    const el = document.activeElement
+    if (!el || el === document.body) return null
+    return (closest ? el.closest(closest) ?? el : el).getBoundingClientRect()
+}
+
+function sellFloor(resource: string, quantity: number) {
+    const at = pressedAt()
+    run(() => town.sellToFloor(resource, quantity), (res) => {
+        sound.play(res.total >= 100_000 ? 'bigcoin' : 'coin')
+        fx.reward(at, { coins: res.total }, { scale: res.total >= 100_000 ? 1.3 : 0.8 })
+        marketDayFloat(at, res.marketBonus)
+    })
+}
+function placeOrder(resource: string, side: 'buy' | 'sell', price: number, quantity: number) {
+    run(() => town.placeOrder(resource, side, price, quantity), (res) => {
+        if (res.status === 'filled') {
+            sound.play(side === 'sell' ? 'coin' : 'buy')
+        } else {
+            sound.play('click')
+        }
+    })
+}
+function sellBulk(items: { resource: string, quantity: number }[]) {
+    if (!items.length) return
+    const at = pressedAt()
+    run(() => town.sellBulk(items), (res) => {
+        sound.play(res.total >= 100_000 ? 'bigcoin' : 'coin')
+        fx.reward(at, { coins: res.total }, { scale: res.total >= 100_000 ? 1.5 : 1 })
+        marketDayFloat(at, res.marketBonus)
+    })
+}
+/** The market-day coins on top of a sale, floated just above the sale's own amount. */
+function marketDayFloat(at: DOMRect | null, bonus: number | undefined) {
+    if (!bonus || bonus <= 0) return
+    const p = at ? { x: at.left + at.width / 2, y: at.top + at.height / 2 } : null
+    setTimeout(() => fx.float(p, [{ icon: 'coin', text: `+${formatNumber(bonus)} market day`, tone: 'gold' }], { dy: -56 }), 180)
+}
+function cancelOrder(orderId: string) {
+    fire(() => town.cancelOrder(orderId), 'close')
+}
+
+// ── Milestones ──
+const claimable = computed(() => town.claimableMilestones.value.length)
+function claimMilestone(id: string) {
+    const at = pressedAt('.goal')
+    run(() => town.claimMilestone(id), (res) => {
+        if (res) fx.reward(at, { coins: res.reward, boosters: res.boosters }, { scale: 1.3 })
+    }, 'bigcoin')
+}
+watch(claimable, (n, prev) => {
+    if (prev !== undefined && n > prev) {
+        sound.play('complete')
+    }
+})
+
+// ── Build completion sound ──
+// The level each running job is headed for (null for a first build). An
+// upgrade undone after a failed request stops running too, but short of it.
+const knownPending = new Map<string, number | null>()
+watch(town.buildings, (list) => {
+    const serverNow = town.serverNow()
+    for (const b of list) {
+        const pending = b.completesAt > serverNow
+        if (pending) knownPending.set(b.id, b.upgradingTo)
+        else if (knownPending.has(b.id)) {
+            const target = knownPending.get(b.id) ?? null
+            knownPending.delete(b.id)
+            if (target === null || b.upgradingTo === target || b.level >= target) sound.play('complete')
+        }
+    }
+}, { deep: true })
+
+// ── Welcome back ──
+const welcome = ref<{ elapsedMs: number, delta: Record<string, number> } | null>(null)
+let welcomeShown = false
+watch(() => town.state.value?.welcomeBack, (wb) => {
+    if (wb && !welcomeShown) { welcomeShown = true; welcome.value = wb }
+}, { immediate: true })
+const welcomeRows = computed(() => Object.entries(welcome.value?.delta ?? {})
+    .map(([id, qty]) => ({ id, qty, def: town.resourceById.value.get(id) }))
+    .sort((a, b) => b.qty - a.qty))
+const welcomeValue = computed(() => welcomeRows.value.reduce((s, r) => s + Math.max(0, r.qty) * (r.def?.floorPrice ?? 0), 0))
+const welcomeGains = computed(() => welcomeRows.value.filter(r => r.qty > 0))
+const welcomeLosses = computed(() => welcomeRows.value.filter(r => r.qty < 0))
+/** The headline worth counts up from zero as the card opens. */
+const welcomeShownValue = ref(0)
+let welcomeRaf = 0
+watch(welcome, (w) => {
+    cancelAnimationFrame(welcomeRaf)
+    welcomeShownValue.value = 0
+    if (!w) return
+    const target = welcomeValue.value
+    if (motion.reduced.value || target <= 0) { welcomeShownValue.value = target; return }
+    const start = performance.now()
+    const step = (t: number) => {
+        if (welcome.value !== w) return
+        const k = Math.min(1, Math.max(0, t - start) / 900)
+        welcomeShownValue.value = Math.round(target * (1 - Math.pow(1 - k, 3)))
+        if (k < 1) welcomeRaf = requestAnimationFrame(step)
+    }
+    welcomeRaf = requestAnimationFrame(step)
+}, { immediate: true })
+onBeforeUnmount(() => cancelAnimationFrame(welcomeRaf))
+
+// ── Help ──
+const helpOpen = ref(false)
+onMounted(() => {
+    try {
+        if (!localStorage.getItem('polytown-help-seen')) {
+            const stop = watch(town.initialized, (v) => {
+                if (v) { helpOpen.value = true; localStorage.setItem('polytown-help-seen', '1'); stop() }
+            }, { immediate: true })
+        }
+    } catch { /* storage unavailable */ }
+})
+
+// ── Daily: the mayor streak and the town hall contracts ──
+const streak = useTownStreak()
+const contracts = useTownContracts(() => town.inventory.value)
+/** Something waiting in the Daily window: a streak step to claim, a contract the town can fill, or the contracts bonus. */
+const dailyBadge = computed(() => streak.claimableCount.value + contracts.readyCount.value + (contracts.bonus.value.claimable ? 1 : 0))
+// Both need a town: refetch only what came back empty before it was founded.
+// A fetch still in flight on a normal load is left alone, since cutting it off
+// would drop the response that unlocked today's step.
+watch(town.initialized, (v) => {
+    if (!v) return
+    if (streak.data.value?.initialized === false) streak.refresh()
+    if (contracts.error.value) contracts.refresh()
+})
+/**
+ * The first visit of a new day opens the track, once the welcome-back card
+ * and the help are out of the way, so the day's step is the first thing seen.
+ * `advancedToday` is latched: a later refetch reports false, and must not
+ * cancel an open that is only waiting on the welcome card.
+ */
+let dailyOpened = false
+const dailyDue = ref(false)
+watch(streak.advancedToday, (v) => { if (v && !dailyOpened) dailyDue.value = true }, { immediate: true })
+watch(() => dailyDue.value && !welcome.value && !helpOpen.value && town.initialized.value, async (ready) => {
+    if (!ready) return
+    // The welcome-back card comes from the same state load and may land a tick
+    // later; once it does, this fires again when it closes.
+    await nextTick()
+    if (!dailyDue.value || welcome.value || helpOpen.value) return
+    dailyDue.value = false
+    dailyOpened = true
+    // Busy with something else: the dock badge is enough.
+    if (windowOpen.value || buildOpen.value || ghostType.value || redesign.value) return
+    windowOpen.value = 'daily'
+}, { immediate: true })
+function onStreakChanged() {
+    town.refresh()
+}
+function onContractDelivered(res: TownContractDelivery) {
+    town.refresh()
+    // The set is complete: a fanfare as the bonus button pops in, after the stamp.
+    if (res.bonusReady) setTimeout(() => sound.play('complete'), motion.reduced.value ? 0 : 550)
+}
+
+// ── Happiness / needs popover ──
+const needs = computed(() => town.needs.value)
+/** Needs the score actually counts — the rest are future tiers, shown greyed. */
+/** Every want the townsfolk have: scored ones, plus goods they eat but the town cannot make yet. */
+const scoredNeeds = computed(() => needs.value.filter(n => n.satisfied || n.expected))
+const unmetNeeds = computed(() => needs.value.filter(n => n.expected && !n.satisfied))
+const starving = computed(() => needs.value.some(n => n.food && n.expected) && !needs.value.some(n => n.food && n.satisfied))
+const mood = computed(() => town.state.value?.mood ?? null)
+const nextMood = computed(() => town.state.value?.nextMood ?? null)
+const happinessPotential = computed(() => town.state.value?.happinessPotential ?? 0)
+const breakdown = computed(() => town.state.value?.happinessBreakdown ?? null)
+/** The happiness score, line by line, worst first — what to fix shows at a glance. */
+const scoreRows = computed(() => {
+    const b = breakdown.value
+    if (!b) return []
+    const rows: { label: string, icon: string, points: number, hint: string }[] = []
+    rows.push({ label: 'Town', icon: 'i-lucide-house', points: b.base, hint: 'Every town starts here' })
+    if (b.needs !== 0) {
+        rows.push({
+            label: 'Needs',
+            icon: 'i-lucide-utensils',
+            points: b.needs,
+            hint: b.needs > 0 ? 'Goods your townsfolk have' : 'Goods they want and cannot get'
+        })
+    }
+    if (b.parks) rows.push({ label: 'Parks', icon: 'i-lucide-trees', points: b.parks, hint: `${formatNumber(b.layout.residentsWithPark)} of ${formatNumber(b.layout.residents)} residents live near one. Averaged over every home.` })
+    if (b.industry) rows.push({ label: 'Industry', icon: 'i-lucide-factory', points: b.industry, hint: `${formatNumber(b.layout.residentsWithIndustry)} residents live beside workshops. Averaged over every home, no ceiling.` })
+    if (b.monuments) rows.push({ label: 'Colosseum', icon: 'i-lucide-landmark', points: b.monuments, hint: 'Felt by the whole town' })
+    if (b.crowding) rows.push({ label: 'Overcrowded', icon: 'i-lucide-users', points: b.crowding, hint: 'More jobs than residents' })
+    if (starving.value) rows.push({ label: 'Starving', icon: 'i-lucide-frown', points: -12, hint: 'No food in store at all' })
+    return rows
+})
+/** A mood's perks as short game-style chips: "+15% production", "−10% build time". */
+function perkChips(m: { speed: number, buildTime: number, storage: number } | null) {
+    if (!m) return []
+    const pct = (v: number) => `${v > 0 ? '+' : '−'}${Math.round(Math.abs(v) * 100)}%`
+    const out: { text: string, icon: string, good: boolean, bad: boolean }[] = []
+    out.push(m.speed === 1
+        ? { text: 'normal production', icon: 'i-lucide-gauge', good: false, bad: false }
+        : { text: `${pct(m.speed - 1)} production`, icon: 'i-lucide-gauge', good: m.speed > 1, bad: m.speed < 1 })
+    if (m.buildTime !== 1) out.push({ text: `${pct(m.buildTime - 1)} build time`, icon: 'i-lucide-hammer', good: m.buildTime < 1, bad: m.buildTime > 1 })
+    if (m.storage !== 1) out.push({ text: `${pct(m.storage - 1)} storage`, icon: 'i-lucide-package', good: true, bad: false })
+    return out
+}
+/** Which building makes a need the town cannot produce yet. */
+function needMaker(resource: string) {
+    const maker = town.catalog.value.find(c => Object.keys(c.outputs).includes(resource))
+    return maker ? `build a ${maker.name} (tier ${maker.tier})` : 'not unlocked yet'
+}
+/** The line a needs row shows — also its tooltip, so a truncated one can be read. */
+function needLine(n: { satisfied: boolean, producible: boolean, perTick: number, resource: string }) {
+    const rate = `${formatNumber(perHour(n.perTick))}/h`
+    if (n.satisfied) return rate
+    if (!n.producible) return `Wants ${rate} · ${needMaker(n.resource)}`
+    return `Out of stock · needs ${rate}`
+}
+/** Shut the HUD popovers when a window or a card takes the screen. */
+function closeHudPopovers() {
+    moodOpen.value = false
+    incomeOpen.value = false
+    buildersPop.value = false
+}
+
+// ── HUD ──
+const happiness = computed(() => town.state.value?.happiness ?? 50)
+const speed = computed(() => town.state.value?.speedMultiplier ?? 0.75)
+const popCap = computed(() => town.state.value?.popCap ?? 0)
+
+// ── Boosts ──
+const BOOST_INFO: Record<TownBoostKind, { name: string, tip: string }> = {
+    build: { name: 'Builder\'s rush', tip: 'Every build and upgrade runs at double speed.' },
+    production: { name: 'Production surge', tip: 'Workshops make twice as much, and use twice the inputs.' },
+    market: { name: 'Market day', tip: 'The town hall pays 1.5× for your goods.' },
+    builder: { name: 'Free builder', tip: 'A borrowed crew takes on one more job at a time.' }
+}
+// ── Booster store ──
+// Boosters are boosts kept for later: rewards pay them, platform gems buy
+// them, and one starts the moment the mayor says so.
+const boostersPop = ref(false)
+const BOOSTER_ROWS = TOWN_BOOSTER_KINDS.map(kind => ({ kind, name: BOOST_INFO[kind].name }))
+const boostersHeld = computed(() => townBoosterCount(town.boosterStore.value))
+/** The chip's badge: the kind held most of, else a surge. */
+const boosterChipKind = computed(() => [...TOWN_BOOSTER_KINDS].sort((a, b) => (town.boosterStore.value[b] ?? 0) - (town.boosterStore.value[a] ?? 0))[0] ?? 'production')
+function boosterHours(kind: TownBoosterKind) {
+    return `${Math.round((town.constants.value.boosterMs[kind] ?? 0) / 3_600_000)}h`
+}
+function startBooster(kind: TownBoosterKind) {
+    run(() => town.useBooster(kind), () => sound.play(kind === 'market' ? 'coin' : 'rush'))
+}
+function buyBooster(kind: TownBoosterKind) {
+    const at = pressedAt()
+    run(() => town.buyBooster(kind), () => {
+        sound.play('gem')
+        fx.reward(at, { boosters: { [kind]: 1 } })
+    })
+}
+
+/** Short countdown for a buff chip: "43m", "23h 10m", "40s". */
+function boostLeft(ms: number) {
+    const s = Math.max(0, Math.ceil(ms / 1000))
+    if (s < 60) return `${s}s`
+    const m = Math.ceil(s / 60)
+    if (m < 60) return `${m}m`
+    return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, '0')}m`
+}
+const activeBoosts = computed(() => {
+    const b = town.boosts.value
+    return (['build', 'production', 'market', 'builder'] as const)
+        .filter(kind => b[kind] !== null && b[kind]! > now.value)
+        .map((kind) => {
+            const info = BOOST_INFO[kind]
+            const left = boostLeft(b[kind]! - now.value)
+            let tip = `${info.name}: ${info.tip}`
+            if (kind === 'market') {
+                tip += town.marketBonusLeft.value > 0
+                    ? `\n${formatNumber(town.marketBonusLeft.value)} bonus coins left to earn.`
+                    : '\nThe bonus budget is spent.'
+            }
+            return { kind, name: info.name, left, tip: `${tip}\nEnds in ${left}.` }
+        })
+})
+/** Production surge: workshop rates shown doubled, with a ×2 marker. */
+const productionMult = computed(() => town.boostMultiplier.value.production)
+/** A build job's length as it would run if started now, the rush counted in. */
+function boostedMs(ms: number) {
+    return townBoostedJobMs(ms, now.value, town.boosts.value.build)
+}
+/** The borrowed crew's countdown, for the builders chip and popover. */
+const tempCrewLeft = computed(() => town.builders.value.tempBuilderUntil ? boostLeft(town.builders.value.tempBuilderUntil - now.value) : null)
+
+// ── Builders ──
+// One crew per running build or upgrade. This is the pacing lever: a town can
+// only grow on as many fronts as it has crews, and the rest cost platform gems.
+const buildersFree = computed(() => town.buildersFree.value)
+const buildersOpen = ref(false)
+function openBuilders() {
+    sound.unlock()
+    buildersPop.value = false
+    if (town.builders.value.nextGemCost === null) return
+    sound.play('open')
+    buildersOpen.value = true
+}
+
+/** Goods the town is running down rather than stocking, worst shortfall first. */
+const starvedGoods = computed(() => Object.entries(town.netPerTick.value)
+    .filter(([, net]) => net < 0)
+    .sort((a, b) => a[1] - b[1])
+    .map(([id]) => id))
+
+/** Every upgrade a free crew could take, one row per building type (see townUpgradeCandidates). */
+const upgradeCandidates = computed(() => townUpgradeCandidates(
+    town.buildings.value, town.catalogById.value, town.constants.value.maxLevel, now.value, canAfford))
+
+/** What the town needs most, best first (see rankTownUpgrades). */
+const recommendedUpgrades = computed(() => rankTownUpgrades({
+    jobs: workersDemanded.value,
+    residents: popCap.value,
+    happiness: happiness.value,
+    storageCap: storageCap.value,
+    netPerHour: Object.fromEntries(Object.entries(town.boostedNetPerTick.value).map(([id, n]) => [id, n * ticksPerHour.value])),
+    stock: town.inventory.value
+}, upgradeCandidates.value))
+
+/** Start one of the recommended upgrades without hunting for the building. */
+function upgradeRecommended(id: string) {
+    buildersPop.value = false
+    if (buildersFree.value === 0) { openBlocked({ kind: 'upgrade', buildingId: id }); return }
+    fire(() => town.upgradeBuilding(id), 'upgrade')
+}
+
+/**
+ * Every job running right now, cheapest to rush first. The block modal offers
+ * the top one so a player who is one crew short can pay their way out of the
+ * wait without hunting for the building on the map.
+ */
+const runningJobs = computed(() => town.buildings.value
+    .filter(b => b.completesAt > now.value && (b.level === 0 || b.upgradingTo !== null) && !getTownMonument(b.type))
+    .map(b => ({
+        id: b.id,
+        name: town.catalogById.value.get(b.type)?.name ?? b.type,
+        type: b.type,
+        level: b.upgradingTo ?? 1,
+        first: b.level === 0,
+        remainingMs: b.completesAt - now.value,
+        /** How far along, 0..1 — the server quotes the job's full length. */
+        progress: townJobProgress(b.completesAt, b.jobMs, now.value, town.boosts.value.build),
+        gems: townRushGemCost(b.completesAt - now.value)
+    }))
+    .sort((a, b) => a.gems - b.gems))
+
+/** The build or upgrade a player asked for while every crew was busy. */
+const blocked = ref<{ kind: 'build', type: string } | { kind: 'upgrade', buildingId: string } | null>(null)
+const blockedCheapest = computed(() => runningJobs.value[0] ?? null)
+
+function openBlocked(next: { kind: 'build', type: string } | { kind: 'upgrade', buildingId: string }) {
+    sound.unlock()
+    sound.play('error')
+    blocked.value = next
+}
+
+/** Rush the cheapest job, then start what the player actually wanted. */
+async function rushAndContinue() {
+    const job = blockedCheapest.value
+    const next = blocked.value
+    if (!job || !next) return
+    blocked.value = null
+    await run(() => town.rushBuilding(job.id), undefined, 'rush')
+    // Still holding it (the block came from a click on the map): keep holding it.
+    if (next.kind === 'build') { if (ghostType.value !== next.type) pickBuild(next.type) }
+    else await run(() => town.upgradeBuilding(next.buildingId), undefined, 'upgrade')
+}
+
+function hireBuilder() {
+    buildersOpen.value = false
+    run(() => town.hireBuilder(), undefined, 'coin')
+}
+const workersDemanded = computed(() => town.state.value?.workersDemanded ?? 0)
+// Floor income counts the workshops only, so a surge doubles all of it.
+const incomePerDay = computed(() => (town.state.value?.floorIncomePerDay ?? 0) * productionMult.value)
+const storageCap = computed(() => town.state.value?.storageCap ?? 0)
+const ticksPerHour = computed(() => townTicksPerHour(town.constants.value.tickMs, speed.value))
+/** Per-tick amounts are an implementation detail; every number the player sees is per hour. */
+function perHour(perTick: number) {
+    return Math.round(perTick * ticksPerHour.value)
+}
+/** Anything too slow to show a whole unit an hour is quoted per day instead. */
+function ioUnit(c: { outputs: Record<string, number> }): 'h' | 'day' {
+    return Object.values(c.outputs).some(q => q * ticksPerHour.value < 1) ? 'day' : 'h'
+}
+/** A workshop's rate as it runs right now: a production surge doubles it. */
+function ioRate(q: number, unit: 'h' | 'day') {
+    const value = q * ticksPerHour.value * productionMult.value * (unit === 'day' ? 24 : 1)
+    return value < 10 ? String(Math.round(value * 10) / 10) : formatNumber(Math.round(value))
+}
+/** A day of output priced at the floor, good by good — which good actually pays. */
+const incomeRows = computed(() => town.resources.value
+    .map((r) => {
+        const perDay = Math.round((town.boostedNetPerTick.value[r.id] ?? 0) * ticksPerHour.value * 24)
+        return { id: r.id, name: r.name, perDay, value: Math.round(perDay * r.floorPrice) }
+    })
+    .filter(r => r.perDay > 0)
+    .sort((a, b) => b.value - a.value))
+
+/** Goods the town can actually make: everything a standing building outputs. */
+const producedIds = computed(() => {
+    const out = new Set<string>()
+    for (const b of town.buildings.value) {
+        if (b.level <= 0) continue
+        const entry = town.catalogById.value.get(b.type)
+        if (entry) for (const id of Object.keys(entry.outputs)) out.add(id)
+    }
+    return out
+})
+const inventoryRows = computed(() => town.resources.value
+    .map(r => ({
+        ...r,
+        amount: town.inventory.value[r.id] ?? 0,
+        perHour: Math.round((town.boostedNetPerTick.value[r.id] ?? 0) * ticksPerHour.value)
+    }))
+    .filter(r => r.amount > 0 || producedIds.value.has(r.id)))
+function toggleSound() {
+    sound.unlock()
+    sound.enabled.value = !sound.enabled.value
+    if (sound.enabled.value) sound.play('click')
+}
+
+/**
+ * The terrain map. Off by default and off after a reload: the town is the
+ * thing worth looking at, and the map is what you reach for while deciding
+ * where something goes.
+ */
+const terrainOverlay = ref(false)
+function toggleTerrain() {
+    terrainOverlay.value = !terrainOverlay.value
+    sound.play('click')
+}
+
+/** The legend, in the order the ground reads: what pays, then what blocks. */
+const terrainLegend = computed(() => TOWN_TERRAINS.map(t => ({
+    id: t.id,
+    name: t.name,
+    emoji: t.emoji,
+    css: townTerrainCss(t.color),
+    description: t.description,
+    /** The building on the cursor gains from this ground. */
+    boosting: ghostType.value !== null && t.boosts.includes(ghostType.value as never)
+})))
+
+function onKey(e: KeyboardEvent) {
+    if (townIsTyping(e.target) || e.metaKey || e.ctrlKey || e.altKey || e.repeat) return
+    const modal = welcome.value || helpOpen.value || confirmDemolish.value || confirmBulk.value || confirmRedesign.value
+    // Any dialog over the map: the build keys must not act behind it.
+    const dialog = modal || blocked.value || buildersOpen.value || confirmPlot.value || confirmListing.value || confirmSellPlot.value
+    if (e.code === 'KeyR' && !modal && (ghostType.value || moveSelection.value)) {
+        e.preventDefault()
+        const dir = e.shiftKey ? -1 : 1
+        if (moveSelection.value) rotateGroup(dir)
+        else rotatePlacement(dir)
+        return
+    }
+    if (e.code === 'KeyC' && !dialog && !windowOpen.value) { copyBuilding(); return }
+    if ((e.key === 'Delete' || e.key === 'Backspace') && !modal && (selectedIds.value.length || selectedBuilding.value)) {
+        e.preventDefault()
+        if (selectedIds.value.length) demolishMany(selectedIds.value)
+        else confirmDemolish.value = true
+        return
+    }
+    if (redesign.value) {
+        // The tray owns the keyboard: Esc drops what is on the cursor, and only
+        // leaves the mode while nothing has been put down yet — after that the
+        // Cancel button is the way out, so a stray Esc cannot throw away a layout.
+        if (e.key === 'Escape') {
+            if (confirmRedesign.value) confirmRedesign.value = null
+            else if (moveSelection.value) moveSelection.value = null
+            else if (selectedIds.value.length) clearSelection()
+            else if (ghostType.value) dropTrayPick()
+            else if (!draftTouched.value) cancelRedesign()
+        } else if ((e.key === 'm' || e.key === 'M') && selectedIds.value.length && !confirmRedesign.value) startGroupMove()
+        else if ((e.key === 'Delete' || e.key === 'Backspace') && selectedIds.value.length && !confirmRedesign.value) { e.preventDefault(); liftSelection() }
+        else if (e.key === 'g' || e.key === 'G') toggleTerrain()
+        return
+    }
+    if (e.key === 'Escape') {
+        if (blocked.value) blocked.value = null
+        else if (buildersOpen.value) buildersOpen.value = false
+        else if (confirmBulk.value) confirmBulk.value = null
+        else if (confirmPlot.value) confirmPlot.value = null
+        else if (confirmListing.value) confirmListing.value = null
+        else if (confirmSellPlot.value) confirmSellPlot.value = null
+        else if (moveSelection.value) moveSelection.value = null
+        else if (ghostType.value) { ghostType.value = null; movingId.value = null }
+        else if (selectedIds.value.length) clearSelection()
+        else if (welcome.value) welcome.value = null
+        else if (helpOpen.value) helpOpen.value = false
+        else closeAll()
+    } else if (buildOpen.value && !dialog && /^Digit[1-9]$/.test(e.code) && buildTier.value === STORAGE_TAB) {
+        const card = storageCards.value[Number(e.code.slice(5)) - 1]
+        if (card) startPlaceStored(card.item, true)
+    } else if (buildOpen.value && !dialog && /^Digit[1-9]$/.test(e.code)) {
+        const card = tierEntries.value[Number(e.code.slice(5)) - 1]
+        if (card && !cardLocked(card)) pickBuild(card.id)
+    } else if (buildOpen.value && !dialog && e.key === 'Tab') {
+        e.preventDefault()
+        cycleTier(e.shiftKey ? -1 : 1)
+    } else if ((e.key === 'u' || e.key === 'U') && !dialog && selectedIds.value.length > 1) { if (!busy.value) upgradeSelection() }
+    else if ((e.key === 'u' || e.key === 'U') && !dialog && selectedBuilding.value && selCanUpgrade.value) {
+        // The same gate as the button: no key press may do what a disabled button cannot.
+        if (!busy.value && canAfford(selUpgradeCost.value) && !(selMonument.value && monumentCrewNote.value)) upgradeSelected()
+        else sound.play('deny')
+    }
+    else if ((e.key === 'm' || e.key === 'M') && selectedIds.value.length > 1) startGroupMove()
+    else if ((e.key === 'm' || e.key === 'M') && selectedBuilding.value) startMove()
+    else if (e.key === 'b' || e.key === 'B') toggleBuild()
+    else if (e.key === 'h' || e.key === 'H') openMarket()
+    else if (e.key === 't' || e.key === 'T') openWindow('goals')
+    else if (e.key === 'y' || e.key === 'Y') openWindow('daily')
+    else if (e.key === 'l' || e.key === 'L') openWindow('mayors')
+    else if (e.key === 'p' || e.key === 'P') openWindow('land')
+    else if (e.key === 'g' || e.key === 'G') toggleTerrain()
+}
+onMounted(() => window.addEventListener('keydown', onKey))
+onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
+
+/**
+ * Effect circles the scene should draw: the ghost's own radius while placing,
+ * the selected building's radius, and every park's radius while a house is the
+ * ghost (so you can see where a home would be happy).
+ */
+const effectRadii = computed(() => {
+    const out: { x: number, y: number, radius: number, kind: 'good' | 'bad' }[] = []
+    const push = (b: { plotId: string, tileX: number, tileY: number }, radius: number, kind: 'good' | 'bad') => {
+        const plot = plotById.value.get(b.plotId)
+        if (plot) out.push({ x: plot.x * TOWN_PLOT_SIZE + b.tileX + 0.5, y: plot.y * TOWN_PLOT_SIZE + b.tileY + 0.5, radius, kind })
+    }
+    const ghostDef = ghostType.value ? town.catalogById.value.get(ghostType.value) : null
+    if (ghostDef && ghostDef.kind === 'housing') {
+        // Placing a house: show every park and industry that would affect it —
+        // the ones standing in the draft while redesigning, not the ones lifted.
+        for (const b of sceneBuildings.value) {
+            if (b.level === 0) continue
+            const def = town.catalogById.value.get(b.type)
+            if (def?.kind === 'civic') push(b, townEffectRadius(getTownBuilding(b.type)!), 'good')
+            else if (def?.kind === 'industry') push(b, townIndustryNuisance(getTownBuilding(b.type)!).radius, 'bad')
+        }
+    }
+    const sel = selectedBuilding.value
+    const selEntry = selectedEntry.value
+    if (sel && selEntry && selEntry.kind === 'civic') push(sel, townEffectRadius(getTownBuilding(selEntry.id)!), 'good')
+    else if (sel && selEntry && selEntry.kind === 'industry') push(sel, townIndustryNuisance(getTownBuilding(selEntry.id)!).radius, 'bad')
+    return out
+})
+
+/** Radius the ghost itself projects, drawn under the cursor while placing. */
+const ghostRadius = computed(() => {
+    const def = ghostType.value ? town.catalogById.value.get(ghostType.value) : null
+    if (!def) return null
+    if (def.kind === 'civic') return { radius: townEffectRadius(getTownBuilding(def.id)!), kind: 'good' as const }
+    if (def.kind === 'industry') return { radius: townIndustryNuisance(getTownBuilding(def.id)!).radius, kind: 'bad' as const }
+    return null
+})
+
+/** Colour a meter by how close to full it is. */
+function barClass(ratio: number) {
+    return ratio >= 0.99 ? 'ok' : ratio >= 0.6 ? 'meh' : 'bad'
+}
+
+function hex(color: number) { return `#${color.toString(16).padStart(6, '0')}` }
+</script>
+
+<template>
+    <div ref="rootEl" class="town-root" @mousemove="trackPointer">
+        <TownScene
+            v-if="town.initialized.value"
+            ref="sceneRef"
+            class="absolute inset-0"
+            :plots="town.plots.value"
+            :buildings="sceneBuildings"
+            :expansions="town.state.value?.expansions ?? []"
+            :selected-building-id="selectedBuildingId"
+            :ghost-type="ghostType"
+            :ghost-rotation="ghostRotation"
+            :ghost-level="ghostLevel"
+            :keyboard-enabled="!windowOpen && !welcome && !helpOpen && !confirmDemolish && !confirmBulk && !confirmPlot && !confirmListing && !confirmSellPlot && !buildersOpen && !blocked && !confirmRedesign"
+            :server-offset-ms="town.serverOffsetMs.value"
+            :pop-cap="popCap"
+            :speed-multiplier="speed"
+            :tick-ms="town.constants.value.tickMs"
+            :expansion-label="expansionLabel"
+            :expansion-affordable="canBuyPlot"
+            :neighbours="town.world.value.towns"
+            :effect-radii="effectRadii"
+            :supply-routes="supplyRoutes"
+            :supply-bonus-tiles="town.state.value?.monumentBonus?.supplyTiles ?? 0"
+            :ghost-radius="ghostRadius"
+            :ghost-issue="ghostIssue"
+            :moving-id="movingId ?? placingStored?.id ?? null"
+            :terrain-overlay="terrainOverlay"
+            :selected-ids="selectedIds"
+            :move-ghosts="moveGhosts"
+            :move-issue="moveIssue"
+            :drag-valid="dragValid"
+            :reduced-motion="motion.reduced.value"
+            :night="theme.nightLevel.value"
+            :boosts="town.boosts.value"
+            @hover-tile="onHoverTile"
+            @select-tile="onSelectTile"
+            @select-building="onSelectBuilding"
+            @select-expansion="buyPlot"
+            @select-listing="onSelectListing"
+            @hover-building="hoveredBuildingId = $event"
+            @hover-neighbour="hoveredNeighbour = $event"
+            @hover-expansion="hoveredSlot = $event"
+            @deselect="onDeselect"
+            @drag-tiles="onDragTiles"
+            @place-line="onPlaceLine"
+            @select-many="onSelectMany"
+        />
+
+        <!-- Founding -->
+        <div v-if="town.state.value && !town.initialized.value" class="found-screen">
+            <div class="found-card">
+                <span class="found-mark"><TownIcon name="i-lucide-house" /></span>
+                <h1 class="found-title">Polytown</h1>
+                <p class="found-copy">
+                    Claim a plot on the endless grid, house your townsfolk, and turn wheat, wood and stone into goods
+                    worth a fortune. Sell to the town hall any time, or trade with other mayors.
+                </p>
+                <button class="g-btn g-btn-primary found-go" :disabled="busy" @click="found">
+                    <TownIcon name="i-lucide-flag" />Found your town
+                </button>
+                <p class="found-note">Your first plot is free.</p>
+            </div>
+        </div>
+        <div v-else-if="!town.state.value" class="absolute inset-0 flex items-center justify-center">
+            <span class="g-spinner" />
+        </div>
+
+        <template v-if="town.initialized.value">
+            <!-- Top-left HUD -->
+            <div class="hud">
+                <div class="g-chip" data-wallet="coins" :data-tip-below="`${formatNumber(balance, false)} town coins`">
+                    <TownCoin />
+                    <b>{{ formatNumber(balance) }}</b>
+                </div>
+                <div v-if="!hub.embedded.value && gems !== null" class="g-chip g-chip-gem" data-wallet="gems" data-tip-below="Gems">
+                    <TownIcon name="i-lucide-gem" class="g-ico is-gem" />
+                    <b>{{ formatNumber(gems) }}</b>
+                </div>
+                <div class="g-chip" :class="workersDemanded > popCap ? 'g-chip-warn' : ''" :data-tip-below="workersDemanded > popCap ? 'Not enough residents — build houses' : 'Jobs / residents'">
+                    <TownIcon name="i-lucide-users" class="g-ico" />
+                    <b>{{ workersDemanded }}<span class="g-sub">/{{ popCap }}</span></b>
+                </div>
+                <div class="hud-hover" @mouseenter="buildersPop = true" @mouseleave="buildersPop = false">
+                    <button class="g-chip g-chip-btn" :class="buildersFree === 0 ? 'g-chip-warn' : ''" @click="openBuilders">
+                        <TownIcon name="i-lucide-hammer" class="g-ico" />
+                        <b>{{ buildersFree }}<span class="g-sub">/</span><span :class="tempCrewLeft ? 'crew-temp' : 'g-sub'">{{ town.builders.value.total }}</span></b>
+                    </button>
+
+                    <Transition name="fade">
+                        <div v-if="buildersPop" class="moodpop is-builders">
+                            <div>
+                                <span class="g-label">In progress</span>
+                                <p class="moodpop-sub">{{ buildersFree }} of {{ town.builders.value.total }} builders free</p>
+                            </div>
+                            <div v-if="tempCrewLeft" class="crew-row">
+                                <TownBoostIcon kind="builder" :size="22" />
+                                <span class="rec-main">
+                                    <b>Free builder</b>
+                                    <span class="moodpop-sub">One extra crew, on loan</span>
+                                </span>
+                                <span class="crew-row-time">{{ tempCrewLeft }}</span>
+                            </div>
+                            <div class="moodpop-group">
+                                <div v-for="j in runningJobs" :key="j.id" class="job-row">
+                                    <span class="rec-art"><TownAsset :id="j.type" kind="building" :level="j.level" /></span>
+                                    <span class="rec-main">
+                                        <span class="job-head">
+                                            <b :data-tip="j.name">{{ j.name }}</b>
+                                            <span class="rec-level">{{ j.first ? 'Building' : `Lv ${j.level - 1} → ${j.level}` }}</span>
+                                            <span class="job-time">{{ formatTownDuration(j.remainingMs) }}</span>
+                                        </span>
+                                        <span class="g-progress job-bar"><i :style="{ width: `${Math.round(j.progress * 100)}%` }" /></span>
+                                    </span>
+                                </div>
+                                <p v-if="runningJobs.length === 0" class="g-empty">Every builder is idle.</p>
+                            </div>
+
+                            <span class="g-label">Recommended upgrades</span>
+                            <div class="moodpop-group">
+                                <button
+                                    v-for="r in recommendedUpgrades"
+                                    :key="r.id"
+                                    class="rec-row"
+                                    :class="r.affordable ? '' : 'is-dim'"
+                                    :disabled="busy || !r.affordable"
+                                    @click="upgradeRecommended(r.id)"
+                                >
+                                    <span class="rec-art"><TownAsset :id="r.type" kind="building" :level="r.level" /></span>
+                                    <span class="rec-main">
+                                        <b :data-tip="r.name">{{ r.name }}</b>
+                                        <span class="rec-meta">
+                                            <span class="rec-level">Lv {{ r.level }} → {{ r.level + 1 }}</span>
+                                            <span v-if="r.reason === 'short' && r.resource" class="g-tag g-tag-red"><TownAsset :id="r.resource" />{{ TOWN_ADVICE_LABELS.short }}</span>
+                                            <span v-else-if="r.reason === 'residents' || r.reason === 'happiness'" class="g-tag g-tag-warn">{{ TOWN_ADVICE_LABELS[r.reason] }}</span>
+                                            <span v-else-if="r.reason === 'storage'" class="g-tag">{{ TOWN_ADVICE_LABELS.storage }}</span>
+                                        </span>
+                                    </span>
+                                    <span class="rec-cost" :class="r.affordable ? '' : 'bad'">
+                                        <span><TownCoin />{{ formatNumber(r.cost.coins) }}</span>
+                                        <span v-for="[id, q] in Object.entries(r.cost.resources)" :key="id">
+                                            <TownAsset :id="id" />{{ formatNumber(q) }}
+                                        </span>
+                                    </span>
+                                </button>
+                                <p v-if="recommendedUpgrades.length === 0" class="g-empty">
+                                    Nothing to upgrade right now.
+                                </p>
+                            </div>
+                            <p v-if="town.builders.value.nextGemCost !== null" class="moodpop-foot">
+                                Click the chip to hire another crew for {{ town.builders.value.nextGemCost }} gems.
+                            </p>
+                        </div>
+                    </Transition>
+                </div>
+                <button
+                    class="g-chip g-chip-btn"
+                    :class="terrainOverlay ? 'is-pinned' : ''"
+                    data-tip-below="Terrain map — which tiles pay a bonus"
+                    @click="toggleTerrain"
+                >
+                    <TownIcon name="i-lucide-mountain" class="g-ico" />
+                    <b>Terrain</b><kbd>G</kbd>
+                </button>
+                <div class="hud-hover" @mouseenter="moodOpen = true" @mouseleave="moodOpen = false">
+                    <div class="g-chip" :class="unmetNeeds.length || starving ? 'g-chip-warn' : ''">
+                        <span class="mood-face">{{ mood?.emoji ?? '🙂' }}</span>
+                        <span class="g-meter g-meter-lg">
+                            <i :style="{ width: `${happiness}%` }" :class="happiness >= 50 ? 'ok' : happiness >= 25 ? 'meh' : 'bad'" />
+                            <em class="g-meter-mark" :style="{ left: `${happinessPotential}%` }" data-tip-below="Reachable with what you can make right now" />
+                        </span>
+                        <b>{{ mood?.name ?? '' }}</b>
+                        <span v-if="unmetNeeds.length" class="g-dot">{{ unmetNeeds.length }}</span>
+                    </div>
+
+                    <Transition name="fade">
+                        <div v-if="moodOpen" class="moodpop">
+                            <div class="moodpop-head">
+                                <span class="mood-face is-lg">{{ mood?.emoji }}</span>
+                                <b>{{ mood?.name }}</b>
+                                <span class="moodpop-score">{{ happiness }}<span class="g-sub">/100</span></span>
+                            </div>
+
+                            <div class="moodpop-perks">
+                                <span v-for="perk in perkChips(mood)" :key="perk.text" class="g-tag" :class="perk.good ? 'g-tag-green' : perk.bad ? 'g-tag-red' : ''">
+                                    <TownIcon :name="perk.icon" />{{ perk.text }}
+                                </span>
+                            </div>
+                            <p v-if="nextMood" class="moodpop-next">
+                                <span class="mood-face">{{ nextMood.emoji }}</span>
+                                <b>{{ nextMood.name }}</b> at {{ nextMood.min }}
+                                <span v-for="perk in perkChips(nextMood)" :key="perk.text" class="moodpop-next-perk">{{ perk.text }}</span>
+                            </p>
+
+                            <div class="moodpop-group">
+                                <span class="g-label">Score</span>
+                                <!-- Tips point down: the rows below are inside the popover, so they show. -->
+                                <div
+                                    v-for="row in scoreRows"
+                                    :key="row.label"
+                                    class="score-row"
+                                    :class="row.points > 0 ? 'is-plus' : row.points < 0 ? 'is-minus' : ''"
+                                    :data-tip-below="row.hint"
+                                >
+                                    <TownIcon :name="row.icon" class="score-ico" />
+                                    <b>{{ row.label }}</b>
+                                    <span class="score-hint">{{ row.hint }}</span>
+                                    <span class="score-points">{{ row.points > 0 ? '+' : '' }}{{ row.points }}</span>
+                                </div>
+                            </div>
+
+                            <div class="moodpop-group">
+                                <span class="g-label">Needs</span>
+                                <div
+                                    v-for="n in scoredNeeds"
+                                    :key="n.resource"
+                                    class="needs-row"
+                                    :class="n.satisfied ? 'is-ok' : 'is-bad'"
+                                    :data-tip="`${needLine(n)}\n${n.description}`"
+                                >
+                                    <span class="needs-ico"><TownAsset :id="n.resource" /></span>
+                                    <b>{{ n.name }}</b>
+                                    <span class="needs-note">{{ needLine(n) }}</span>
+                                    <span class="needs-badge">{{ n.satisfied ? '+' : '−' }}{{ n.happiness }}</span>
+                                </div>
+                                <p v-if="scoredNeeds.length === 0" class="g-empty">Nothing wanted yet.</p>
+                            </div>
+                        </div>
+                    </Transition>
+                </div>
+                <div class="hud-hover" @mouseenter="incomeOpen = true" @mouseleave="incomeOpen = false">
+                    <div class="g-chip">
+                        <TownIcon name="i-lucide-trending-up" class="g-ico is-green" />
+                        <b>{{ formatNumber(incomePerDay) }}</b><span class="g-sub">/day if sold</span>
+                        <em v-if="productionMult > 1" class="boost-x">×2</em>
+                    </div>
+
+                    <Transition name="fade">
+                        <div v-if="incomeOpen" class="moodpop is-income">
+                            <span class="g-label">Per day, sold at floor<template v-if="productionMult > 1"> · production surge ×2</template></span>
+                            <div class="moodpop-group">
+                                <div v-for="r in incomeRows" :key="r.id" class="income-row">
+                                    <span class="income-ico"><TownAsset :id="r.id" /></span>
+                                    <b :data-tip="r.name">{{ r.name }}</b>
+                                    <span class="income-rate">+{{ formatNumber(r.perDay) }}/day</span>
+                                    <span class="income-value"><TownCoin />{{ formatNumber(r.value) }}</span>
+                                </div>
+                                <p v-if="incomeRows.length === 0" class="g-empty">Nothing is being produced yet.</p>
+                                <div v-if="incomeRows.length" class="income-row is-total">
+                                    <span class="g-label">Total</span>
+                                    <span class="income-value"><TownCoin />{{ formatNumber(incomePerDay) }}</span>
+                                </div>
+                            </div>
+                        </div>
+                    </Transition>
+                </div>
+                <!-- Boosters in store: start one, or buy one with gems -->
+                <div class="hud-hover" @mouseenter="boostersPop = true" @mouseleave="boostersPop = false">
+                    <button class="g-chip g-chip-btn" :aria-label="`Boosters, ${boostersHeld} held`" @click="boostersPop = !boostersPop">
+                        <TownBoostIcon :kind="boosterChipKind" :size="18" />
+                        <b>{{ boostersHeld }}</b>
+                    </button>
+
+                    <Transition name="fade">
+                        <div v-if="boostersPop" class="moodpop is-boosters">
+                            <span class="g-label">Boosters</span>
+                            <div class="moodpop-group">
+                                <div v-for="r in BOOSTER_ROWS" :key="r.kind" class="booster-row" :data-tip="BOOST_INFO[r.kind].tip">
+                                    <TownBoostIcon :kind="r.kind" :size="24" />
+                                    <span class="rec-main">
+                                        <b>{{ r.name }}</b>
+                                        <span class="moodpop-sub">{{ boosterHours(r.kind) }}</span>
+                                    </span>
+                                    <b class="booster-held" :class="(town.boosterStore.value[r.kind] ?? 0) > 0 ? '' : 'g-sub'">×{{ town.boosterStore.value[r.kind] ?? 0 }}</b>
+                                    <button class="g-btn g-btn-sm" :disabled="busy || (town.boosterStore.value[r.kind] ?? 0) < 1" @click="startBooster(r.kind)">
+                                        <TownIcon name="i-lucide-play" />Start
+                                    </button>
+                                    <button class="g-btn g-btn-gem g-btn-sm" :disabled="busy || gemsShort(town.constants.value.boosterGemPrices[r.kind])" @click="buyBooster(r.kind)">
+                                        <TownIcon name="i-lucide-gem" />{{ town.constants.value.boosterGemPrices[r.kind] }}
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </Transition>
+                </div>
+                <!-- Timed boosts: one chip each while it runs -->
+                <TransitionGroup name="buff">
+                    <div
+                        v-for="b in activeBoosts"
+                        :key="b.kind"
+                        class="g-chip buff"
+                        :class="[`is-${b.kind}`, motion.reduced.value ? 'is-calm' : '']"
+                        :data-tip-below="b.tip"
+                        role="status"
+                        :aria-label="`${b.name}, ${b.left} left`"
+                    >
+                        <TownBoostIcon :kind="b.kind" :size="20" />
+                        <span class="buff-name">{{ b.name }}</span>
+                        <b class="buff-time">{{ b.left }}</b>
+                    </div>
+                </TransitionGroup>
+            </div>
+
+            <!-- Top-right controls -->
+            <div class="corner">
+                <button v-if="town.initialized.value" class="g-icon draft-btn" :class="redesign ? 'is-on' : ''" :data-tip-below="town.redesignDraft.value ? 'Redesign — carry on with your saved draft' : 'Redesign — pick the whole town up and lay it out again'" @click="redesign ? cancelRedesign() : startRedesign()">
+                    <TownIcon name="i-lucide-pencil-ruler" />
+                    <span v-if="town.redesignDraft.value && !redesign" class="draft-dot" />
+                </button>
+                <button class="g-icon" :class="windowOpen === 'events' ? 'is-on' : ''" data-tip-below="What happened — finished builds, monument stages, filled offers" @click="openWindow('events')">
+                    <TownIcon name="i-lucide-bell" />
+                </button>
+                <button class="g-icon" data-tip-below="How to play" @click="helpOpen = true">
+                    <TownIcon name="i-lucide-circle-question-mark" />
+                </button>
+                <button class="g-icon" :data-tip-below="sound.enabled.value ? 'Mute' : 'Unmute'" @click="toggleSound">
+                    <TownIcon :name="sound.enabled.value ? 'i-lucide-volume-2' : 'i-lucide-volume-off'" />
+                </button>
+                <button class="g-icon" :class="theme.mode.value !== 'system' ? 'is-on' : ''" :data-tip-below="THEME_TIPS[theme.mode.value]" @click="theme.cycle()">
+                    <TownIcon :name="THEME_ICONS[theme.mode.value]" />
+                </button>
+                <button class="g-icon" :class="motion.reduced.value ? 'is-on' : ''" :data-tip-below="motion.reduced.value ? 'Reduced motion on — flat view, no camera glide, snap turns' : 'Reduce motion'" @click="motion.toggle()">
+                    <TownIcon :name="motion.reduced.value ? 'i-lucide-accessibility' : 'i-lucide-wind'" />
+                </button>
+                <button class="g-icon" data-tip-below="Recenter" @click="sceneRef?.recenter()">
+                    <TownIcon name="i-lucide-locate-fixed" />
+                </button>
+            </div>
+
+            <!-- Reduced motion: a still frame at the edges gives the eye something that never moves. -->
+            <div v-if="motion.reduced.value" class="motion-frame" aria-hidden="true" />
+
+            <!-- Placement hint -->
+            <Transition name="fade">
+                <div v-if="moveSelection" class="hint">
+                    <TownIcon name="i-lucide-move" />
+                    <b>{{ moveSelection.items.length }} moving</b>
+                    <span class="hint-note">press R to rotate</span>
+                    <button class="hint-btn" data-tip-below="Turn the whole block a quarter turn. Shift+R turns it back" @click="rotateGroup()"><kbd>R</kbd>rotate</button>
+                    <kbd>Esc</kbd>
+                </div>
+                <div v-else-if="redesign && ghostType" class="hint">
+                    <TownAsset v-if="ghostType !== 'road'" :id="ghostType" kind="building" :level="ghostLevel" />
+                    <TownIcon v-else name="i-lucide-route" />
+                    <b>{{ town.catalogById.value.get(ghostType)?.name }}</b>
+                    <span class="hint-note">{{ ghostType === 'road' ? 'click or drag to lay' : 'click to put down · drag for a row' }}</span>
+                    <button v-if="ghostType !== 'road'" class="hint-btn" data-tip-below="The white arrow is the front door. Shift+R turns it back" @click="rotatePlacement()"><kbd>R</kbd>rotate</button>
+                    <kbd>Esc</kbd>
+                </div>
+                <div v-else-if="ghostType" class="hint">
+                    <TownAsset v-if="ghostType !== 'road'" :id="ghostType" kind="building" :level="ghostLevel" />
+                    <TownIcon v-else name="i-lucide-route" />
+                    <b>{{ town.catalogById.value.get(ghostType)?.name }}</b>
+                    <span v-if="placingStored" class="hint-note">out of storage · press R to turn the front door to a road</span>
+                    <span v-else-if="movingId" class="hint-note">moving · press R to turn the front door to a road</span>
+                    <span v-else-if="dragQuote" class="hint-quote">×{{ dragQuote.count }}<TownCoin />{{ formatNumber(dragQuote.coins) }}</span>
+                    <template v-else-if="ghostCost">
+                        <span v-if="ghostBlocker" class="hint-warn">{{ ghostBlocker }}</span>
+                        <span v-else class="hint-note">drag to lay a run</span>
+                    </template>
+                    <button
+                        v-if="town.catalogById.value.get(ghostType)?.kind !== 'road'"
+                        class="hint-btn"
+                        data-tip-below="The white arrow marks the front door. A building works when its door touches a road. Shift+R turns it back"
+                        @click="rotatePlacement()"
+                    >
+                        <kbd>R</kbd>rotate
+                    </button>
+                    <span class="hint-note" data-tip-below="Esc or a right-click lets go of it"><kbd>Esc</kbd></span>
+                </div>
+                <div v-else-if="hoveredSlot && plotPurchase && plotRemainingMs > 0 && !plotPurchase.maxed" class="hint">
+                    <TownIcon name="i-lucide-map" />Land office opens in <b>{{ formatTownDuration(plotRemainingMs) }}</b>
+                </div>
+            </Transition>
+
+            <!-- Inventory (left) -->
+            <div v-if="inventoryRows.length" class="inv">
+                <button v-for="r in inventoryRows" :key="r.id" class="inv-row" :class="r.amount >= storageCap ? 'is-full' : ''" :data-tip="r.amount >= storageCap ? `${r.name} — storage full` : r.name" @click="openMarket(r.id)">
+                    <span class="inv-ico"><TownAsset :id="r.id" /></span>
+                    <span class="inv-num">{{ formatNumber(r.amount) }}</span>
+                    <span class="inv-tail">
+                        <TownIcon v-if="r.amount >= storageCap" name="i-lucide-package" class="inv-full" />
+                        <span v-if="r.perHour" class="inv-rate" :class="r.perHour > 0 ? 'up' : 'down'">{{ r.perHour > 0 ? '+' : '' }}{{ formatNumber(r.perHour) }}/h<em v-if="productionMult > 1 && r.perHour > 0" class="boost-x">×2</em></span>
+                    </span>
+                </button>
+            </div>
+
+            <!-- Land for sale under the cursor -->
+            <div v-if="hoveredSlot && !hoveredBuilding && !hoveredNeighbour" class="tip is-cursor">
+                <template v-if="!hoveredSlot.free">
+                    <b>{{ hoveredSlot.ownerName ?? 'Another mayor' }}</b>
+                    <div class="tip-sub">Their land</div>
+                </template>
+                <template v-else-if="plotPurchase?.maxed">
+                    <b><TownIcon name="i-lucide-map" />Land office</b>
+                    <div class="tip-sub">You own the maximum number of plots</div>
+                </template>
+                <template v-else-if="plotRemainingMs > 0">
+                    <b><TownIcon name="i-lucide-map" />For sale</b>
+                    <div class="tip-sub">Opens in {{ formatTownDuration(plotRemainingMs) }}</div>
+                </template>
+                <template v-else>
+                    <b><TownIcon name="i-lucide-map" />For sale · <TownCoin />{{ formatNumber(plotPurchase?.price ?? 0) }}</b>
+                    <div class="tip-sub">{{ plotAffordable ? 'Click to buy' : 'Not enough coins' }}</div>
+                </template>
+            </div>
+
+            <!-- Another mayor's land -->
+            <div v-if="hoveredNeighbour && !hoveredBuilding" class="tip is-cursor">
+                <b>{{ hoveredNeighbour.ownerName }}</b>
+                <div v-if="hoveredNeighbour.type" class="tip-sub">
+                    <TownAsset v-if="hoveredNeighbour.type !== 'road'" :id="hoveredNeighbour.type" kind="building" />
+                    <TownIcon v-else name="i-lucide-route" />
+                    {{ town.catalogById.value.get(hoveredNeighbour.type)?.name ?? 'Building' }}<template v-if="hoveredNeighbour.level && hoveredNeighbour.type !== 'road'"> · Lv {{ hoveredNeighbour.level }}</template>
+                </div>
+            </div>
+
+            <!-- Hover tooltip -->
+            <div v-if="hoveredBuilding && hoveredEntry && !selectedBuilding" class="tip is-cursor">
+                <b>
+                    <TownAsset :id="hoveredEntry.id" kind="building" :level="hoveredBuilding.level" />
+                    {{ hoveredEntry.name }}
+                    <span v-if="hoveredBuilding.level > 0" class="g-sub">Lv {{ hoveredBuilding.level }}</span>
+                </b>
+                <div class="tip-sub">
+                    <template v-if="redesign">click to lift it again</template>
+                    <template v-else-if="hoveredBuilding.connected === false && hoveredEntry.kind !== 'road'">
+                        <span class="tip-bad"><TownIcon name="i-lucide-triangle-alert" />No road at the front door</span>
+                    </template>
+                    <template v-else-if="hoveredBuilding.completesAt > now">{{ hoveredBuilding.level === 0 ? 'Building' : 'Upgrading' }} · {{ formatTownDuration(hoveredBuilding.completesAt - now) }}</template>
+                    <template v-else-if="hoveredEntry.kind === 'industry' && hoveredBuilding.district?.residents === 0">
+                        <span class="tip-bad"><TownIcon name="i-lucide-triangle-alert" />No homes on this road</span>
+                    </template>
+                    <template v-else-if="hoveredEntry.kind === 'industry'">{{ Math.round((hoveredBuilding.staffing ?? 0) * 100) }}% staffed</template>
+                    <template v-else-if="hoveredEntry.kind === 'housing'">{{ hoveredEntry.popCap * hoveredBuilding.level }} residents</template>
+                    <template v-else>Click for details</template>
+                </div>
+            </div>
+
+            <!-- Selection toolbar: what a marquee gathered, and what can be done to it -->
+            <Transition name="rise">
+                <div v-if="(selectedIds.length > 1 || (redesign && selectedIds.length)) && !moveSelection" class="seltoolbar">
+                    <b class="seltoolbar-count">{{ selectedIds.length }} selected</b>
+                    <button class="g-btn g-btn-sm" data-tip="Move the whole block. Sites travel too." :disabled="busy" @click="startGroupMove">
+                        <TownIcon name="i-lucide-move" />Move<kbd>M</kbd>
+                    </button>
+                    <button v-if="redesign" class="g-btn g-btn-sm" data-tip="Back into the tray." @click="liftSelection">
+                        <TownIcon name="i-lucide-undo-2" />Lift<kbd>Del</kbd>
+                    </button>
+                    <button v-if="!redesign" class="g-btn g-btn-sm" :disabled="busy || selectionUpgradable.length === 0" :data-tip="selectionUpgradable.length ? 'As many as your crews and coins allow.' : 'None can upgrade now.'" @click="upgradeSelection">
+                        <TownIcon name="i-lucide-arrow-up" />Upgrade {{ selectionUpgradable.length }}<kbd>U</kbd>
+                    </button>
+                    <button v-if="!redesign" class="g-btn g-btn-sm" :disabled="busy" data-tip="Take them off the map, roads too." @click="storeIds(selectedIds)">
+                        <TownIcon name="i-lucide-archive" />Store
+                    </button>
+                    <button v-if="redesign" class="g-btn g-btn-sm" data-tip="Goes into storage when you save the layout." @click="markForStorage(selectedIds)">
+                        <TownIcon name="i-lucide-archive" />To storage
+                    </button>
+                    <button v-if="!redesign" class="g-btn g-btn-sm g-btn-danger" data-tip="No refund." :disabled="busy" @click="demolishMany(selectedIds)">
+                        <TownIcon name="i-lucide-trash-2" />Demolish<kbd>Del</kbd>
+                    </button>
+                    <button class="g-icon g-icon-sm" data-tip="Clear" aria-label="Clear selection" @click="clearSelection">
+                        <TownIcon name="i-lucide-x" />
+                    </button>
+                </div>
+            </Transition>
+
+            <!-- Selected building card -->
+            <Transition name="rise">
+                <div v-if="selectedBuilding && selectedEntry" class="card g-panel">
+                    <div class="card-head">
+                        <span class="card-art" :style="{ background: hex(selectedEntry.color) + '22' }">
+                            <TownAsset :id="selectedEntry.id" kind="building" :level="selectedBuilding.level" />
+                        </span>
+                        <div class="min-w-0 flex-1">
+                            <div class="card-title">
+                                <b>{{ selectedEntry.name }}</b>
+                                <span v-if="selectedBuilding.level > 0 && selectedEntry.kind !== 'road'" class="g-tag" :data-tip="selMonument ? `Finished at stage ${selMaxLevel}.` : `This one tops out at level ${selMaxLevel}.`">
+                                    {{ selMonument ? 'Stage' : 'Lv' }} {{ selectedBuilding.level }}<span class="g-sub">/{{ selMaxLevel }}</span>
+                                    <template v-if="selectedBuilding.upgradingTo"><TownIcon name="i-lucide-arrow-right" />{{ selectedBuilding.upgradingTo }}</template>
+                                </span>
+                                <span v-else class="g-tag">Site</span>
+                            </div>
+                            <div class="card-desc">{{ selectedEntry.description }}</div>
+                        </div>
+                        <button class="g-icon g-icon-sm" aria-label="Close" @click="closeAll"><TownIcon name="i-lucide-x" /></button>
+                    </div>
+
+                    <div class="card-body">
+                        <div v-if="selectedBuilding.connected === false && selectedEntry.kind !== 'road'" class="card-alert">
+                            <TownIcon name="i-lucide-triangle-alert" />
+                            <span>No road at the front door. Nothing works here until a road reaches the tile the white arrow points at.</span>
+                        </div>
+
+                        <div v-if="selPending" class="card-row">
+                            <div class="flex-1">
+                                <div class="card-progress-head">
+                                    <span class="g-label"><TownIcon name="i-lucide-hammer" />{{ selectedBuilding.level === 0 ? 'Under construction' : selMonument ? `Stage ${selectedBuilding.upgradingTo}` : 'Upgrading' }}<em v-if="town.boosts.value.build" class="boost-x is-build" data-tip="Builder's rush: double speed">×2</em></span>
+                                    <b>{{ formatTownDuration(selRemaining) }}</b>
+                                </div>
+                                <div class="g-progress" :class="town.boosts.value.build ? 'is-rushed' : ''"><i :style="{ width: `${Math.round(100 * townJobProgress(selectedBuilding.completesAt, selectedBuilding.jobMs, now, town.boosts.value.build))}%` }" /></div>
+                            </div>
+                            <button class="g-btn g-btn-gem g-btn-sm" :disabled="busy || gemsShort(selRushGems)" @click="rushSelected">
+                                <TownIcon name="i-lucide-gem" />Rush {{ selRushGems }}
+                            </button>
+                        </div>
+
+                        <!-- A site can be moved like anything else: the clock keeps running. -->
+                        <div v-if="selPending" class="card-actions">
+                            <button class="g-btn g-btn-sm" data-tip="The build carries on wherever you put it." :disabled="busy" @click="startMove">
+                                <TownIcon name="i-lucide-move" />Move<kbd>M</kbd>
+                            </button>
+                            <button class="g-btn g-btn-sm" :data-tip="storeTip" :disabled="busy" @click="storeIds([selectedBuilding.id])">
+                                <TownIcon name="i-lucide-archive" />Store
+                            </button>
+                            <button v-if="!selMonument" class="g-btn g-btn-sm g-btn-danger" data-tip="No refund." @click="confirmDemolish = true">
+                                <TownIcon name="i-lucide-trash-2" />Demolish
+                            </button>
+                        </div>
+
+                        <template v-else>
+                            <!-- What it makes, at the rate it really runs -->
+                            <div v-if="selectedEntry.kind === 'industry'" class="recipe">
+                                <span v-for="[id, q] in Object.entries(selectedEntry.inputs)" :key="id" class="recipe-item is-in" :data-tip="town.resourceById.value.get(id)?.name">
+                                    <TownAsset :id="id" />−{{ selRate(q) }}
+                                </span>
+                                <TownIcon v-if="Object.keys(selectedEntry.inputs).length" name="i-lucide-arrow-right" class="recipe-arrow" />
+                                <span v-for="[id, q] in Object.entries(selectedEntry.outputs)" :key="id" class="recipe-item is-out" :data-tip="town.resourceById.value.get(id)?.name">
+                                    <TownAsset :id="id" />+{{ selRate(q) }}
+                                </span>
+                                <span class="recipe-unit" data-tip="What it really moves right now. Level, workers and supply are all counted in.">per {{ selUnit === 'day' ? 'day' : 'hour' }}</span>
+                                <em v-if="productionMult > 1" class="boost-x" data-tip="Production surge: twice the output, twice the inputs">×2</em>
+                            </div>
+
+                            <!-- The two things that slow a building down -->
+                            <div v-if="selWorkersWanted > 0" class="meters">
+                                <div class="meter" :data-tip="selWorkersTitle">
+                                    <TownIcon name="i-lucide-users" class="meter-ico" />
+                                    <span class="meter-label">Workers <em>{{ selWorkersWanted }}</em></span>
+                                    <span class="g-meter"><i :class="barClass(selectedBuilding.staffing ?? 0)" :style="{ width: `${Math.round((selectedBuilding.staffing ?? 0) * 100)}%` }" /></span>
+                                    <b class="meter-value">{{ Math.round((selectedBuilding.staffing ?? 0) * 100) }}%</b>
+                                </div>
+                                <div v-if="selSupply && selectedEntry.kind === 'industry' && Object.keys(selectedEntry.inputs).length" class="meter" :data-tip="selSupplyTitle">
+                                    <TownIcon name="i-lucide-truck" class="meter-ico" />
+                                    <span class="meter-label">Supply</span>
+                                    <span class="g-meter"><i :class="barClass(selSupply.ratio)" :style="{ width: `${Math.round(selSupply.ratio * 100)}%` }" /></span>
+                                    <b class="meter-value">{{ Math.round(selSupply.ratio * 100) }}%</b>
+                                </div>
+                            </div>
+
+                            <!-- Everything else says its one thing -->
+                            <div v-if="selectedEntry.kind === 'housing'" class="card-stats">
+                                <span class="g-tag g-tag-green"><TownIcon name="i-lucide-users" />{{ selectedEntry.popCap * selectedBuilding.level }} residents</span>
+                                <span v-if="selAdjacency" class="g-tag" :class="selAdjacency.cheer ? 'g-tag-green' : ''" :data-tip="`${selAdjacency.parks} park${selAdjacency.parks === 1 ? '' : 's'} in reach. A home gains at most +${town.constants.value.houseCheerMax} from them.`">
+                                    <TownIcon name="i-lucide-trees" />+{{ selAdjacency.cheer }}
+                                </span>
+                                <span v-if="selAdjacency" class="g-tag" :class="selAdjacency.nuisance ? 'g-tag-red' : ''" :data-tip="`${selAdjacency.industry} workshop${selAdjacency.industry === 1 ? '' : 's'} in reach. No ceiling: every one you add makes this home unhappier.`">
+                                    <TownIcon name="i-lucide-factory" />{{ selAdjacency.nuisance ? `−${selAdjacency.nuisance}` : '0' }}
+                                </span>
+                            </div>
+                            <div v-else-if="selectedEntry.kind === 'civic'" class="card-stats">
+                                <span class="g-tag g-tag-green" :data-tip="`Each home in reach gains this much. A home gains at most +${town.constants.value.houseCheerMax} from all its parks together, and only homes in reach feel it.`"><TownIcon name="i-lucide-smile" />+{{ Math.min(town.constants.value.houseCheerMax, townCivicCheer(getTownBuilding(selectedEntry.id)!, selectedBuilding.level)) }} per home</span>
+                                <span class="g-tag" :data-tip="`Only homes within ${townEffectRadius(getTownBuilding(selectedEntry.id)!)} tiles feel it.`">
+                                    <TownIcon name="i-lucide-ruler" />{{ townEffectRadius(getTownBuilding(selectedEntry.id)!) }} tiles
+                                </span>
+                            </div>
+                            <div v-else-if="selMonument" class="card-stats">
+                                <span v-for="line in selMonumentNow" :key="line" class="g-tag g-tag-green" data-tip="Felt town-wide while a road reaches it."><TownIcon name="i-lucide-landmark" />{{ line }}</span>
+                            </div>
+                            <div v-else-if="selectedEntry.kind === 'storage'" class="card-stats">
+                                <span class="g-tag" :class="(selectedBuilding.staffing ?? 0) >= 0.99 ? 'g-tag-green' : ''" data-tip="A warehouse holds only what its crew can manage, so an unstaffed one holds nothing.">
+                                    <TownIcon name="i-lucide-package" />+{{ formatNumber(Math.floor(selectedEntry.storage * selectedBuilding.level * (selectedBuilding.staffing ?? 0))) }} per good
+                                </span>
+                            </div>
+
+                            <!-- Notes, only when they have something to say -->
+                            <p v-if="selDistrictFix" class="card-note">
+                                <TownIcon name="i-lucide-users" />{{ selDistrictFix }}
+                            </p>
+                            <p v-else-if="selSupplyFix" class="card-note">
+                                <TownAsset :id="selSupplyFix.resource" />
+                                Starved of {{ selSupplyFix.name }} — put a {{ selSupplyFix.maker }} within {{ selSupplyFix.tiles }} road tiles, or buy some at the market.
+                            </p>
+                            <p v-else-if="selNuisance && selNuisance.homes > 0" class="card-note">
+                                <TownIcon name="i-lucide-factory" />{{ selNuisance.homes }} {{ selNuisance.homes === 1 ? 'home' : 'homes' }} within {{ selNuisance.radius }} tiles, each {{ selNuisance.perHome }} unhappier for it.
+                            </p>
+
+                            <!-- Upgrade -->
+                            <div v-if="selCanUpgrade && selectedEntry.kind !== 'road'" class="upgrade">
+                                <!-- Both faces are always laid out, one over the other, so the card never
+                                     changes height when the hover swaps the cost for the preview. -->
+                                <div class="upgrade-faces">
+                                    <div v-if="selUpgradePreview.length" class="upgrade-info" :class="previewUpgrade ? '' : 'is-hidden'" :aria-hidden="!previewUpgrade">
+                                        <div class="upgrade-head">
+                                            <span class="g-label">{{ selMonument ? 'Stage' : 'Level' }} {{ selectedBuilding.level }} → {{ selNextLevel }}</span>
+                                            <span v-if="selectedEntry.kind === 'industry'" class="g-sub">per {{ selUnit === 'day' ? 'day' : 'hour' }}</span>
+                                        </div>
+                                        <div class="upgrade-cost">
+                                            <span v-for="(r, i) in selUpgradePreview" :key="i" :data-tip="r.tip">
+                                                <TownAsset v-if="r.id" :id="r.id" />
+                                                <TownIcon v-else-if="r.ico" :name="r.ico" />
+                                                <s class="preview-from">{{ r.from }}</s>
+                                                <b :class="r.up ? 'preview-up' : 'preview-more'">{{ r.to }}</b>
+                                                <em v-if="!r.id" class="preview-label">{{ r.label }}</em>
+                                            </span>
+                                        </div>
+                                    </div>
+                                    <div class="upgrade-info" :class="previewUpgrade && selUpgradePreview.length ? 'is-hidden' : ''" :aria-hidden="previewUpgrade && selUpgradePreview.length > 0">
+                                        <div class="upgrade-head">
+                                            <span class="g-label">{{ selMonument ? 'Stage' : 'Level' }} {{ selNextLevel }}</span>
+                                            <span class="g-sub" :class="town.boosts.value.build ? 'is-rushed' : ''"><TownIcon name="i-lucide-clock" />{{ formatTownDuration(selUpgradeMs) }}</span>
+                                        </div>
+                                        <div class="upgrade-cost">
+                                            <span :class="balance >= selUpgradeCost.coins ? '' : 'bad'"><TownCoin />{{ formatNumber(selUpgradeCost.coins) }}</span>
+                                            <span v-for="[id, q] in Object.entries(selUpgradeCost.resources)" :key="id" :class="(town.inventory.value[id] ?? 0) >= q ? '' : 'bad'">
+                                                <TownAsset :id="id" />{{ formatNumber(q) }}
+                                            </span>
+                                        </div>
+                                    </div>
+                                </div>
+                                <button
+                                    v-if="selMonument"
+                                    class="g-btn g-btn-primary g-btn-sm"
+                                    :disabled="busy || !canAfford(selUpgradeCost) || !!monumentCrewNote"
+                                    :data-tip="monumentCrewNote ?? (canAfford(selUpgradeCost) ? 'Monuments have their own crew, one stage at a time.' : 'You are short on what is marked red.')"
+                                    @mouseenter="previewUpgrade = true"
+                                    @mouseleave="previewUpgrade = false"
+                                    @focus="previewUpgrade = true"
+                                    @blur="previewUpgrade = false"
+                                    @click="upgradeSelected"
+                                >
+                                    <TownIcon name="i-lucide-landmark" />Build<kbd>U</kbd>
+                                </button>
+                                <button
+                                    v-else
+                                    class="g-btn g-btn-primary g-btn-sm"
+                                    :disabled="busy || !canAfford(selUpgradeCost)"
+                                    :data-tip="buildersFree === 0 ? 'Every builder is on a job — click to free one.' : canAfford(selUpgradeCost) ? undefined : 'You are short on what is marked red.'"
+                                    @mouseenter="previewUpgrade = true"
+                                    @mouseleave="previewUpgrade = false"
+                                    @focus="previewUpgrade = true"
+                                    @blur="previewUpgrade = false"
+                                    @click="upgradeSelected"
+                                >
+                                    <TownIcon name="i-lucide-arrow-up" />{{ buildersFree === 0 ? 'No builder' : 'Upgrade' }}<kbd>U</kbd>
+                                </button>
+                            </div>
+                            <div v-else-if="selectedEntry.kind !== 'road'" class="g-tag g-tag-gold card-maxed">
+                                <TownIcon name="i-lucide-medal" />{{ selMonument ? 'Complete' : 'Fully upgraded' }}
+                            </div>
+
+                            <div class="card-actions">
+                                <button class="g-btn g-btn-sm" data-tip="Free. Away from a road it stops working until one reaches it." :disabled="busy" @click="startMove">
+                                    <TownIcon name="i-lucide-move" />Move<kbd>M</kbd>
+                                </button>
+                                <button class="g-btn g-btn-sm" :data-tip="storeTip" :disabled="busy" @click="storeIds([selectedBuilding.id])">
+                                    <TownIcon name="i-lucide-archive" />Store
+                                </button>
+                                <button v-if="!selMonument" class="g-btn g-btn-sm g-btn-danger" data-tip="Nothing is refunded." @click="confirmDemolish = true">
+                                    <TownIcon name="i-lucide-trash-2" />Demolish
+                                </button>
+                            </div>
+                        </template>
+                    </div>
+                </div>
+            </Transition>
+
+            <!-- Build strip -->
+            <Transition name="rise">
+                <div v-if="buildOpen" class="strip g-panel">
+                    <div class="strip-tabs">
+                        <button v-for="t in tiers" :key="t" class="strip-tab" :class="[buildTier === t ? 'is-active' : '', tierLocked(t) ? 'is-locked' : '']" @click="pickTier(t)">
+                            <TownIcon v-if="tierLocked(t)" name="i-lucide-lock" />{{ tierName(t) }}
+                        </button>
+                        <button class="strip-tab" :class="buildTier === MONUMENT_TAB ? 'is-active' : ''" @click="pickTier(MONUMENT_TAB)">
+                            <TownIcon name="i-lucide-landmark" />Monuments
+                        </button>
+                        <button v-if="hasStored" class="strip-tab is-storage" :class="buildTier === STORAGE_TAB ? 'is-active' : ''" data-tip-below="Buildings taken off the map. Putting one back is free." @click="pickTier(STORAGE_TAB)">
+                            <TownIcon name="i-lucide-archive" />Storage <span class="strip-tab-count">{{ town.storage.value.items.length }}</span>
+                        </button>
+                        <button class="g-icon g-icon-sm ml-auto" aria-label="Close" @click="toggleBuild"><TownIcon name="i-lucide-x" /></button>
+                    </div>
+                    <div v-if="tierLocked(buildTier) && tierLockText(buildTier)" class="strip-lock">
+                        <TownIcon name="i-lucide-lock" />{{ tierLockText(buildTier) }}
+                    </div>
+                    <div v-if="buildTier === STORAGE_TAB" class="strip-cards">
+                        <button
+                            v-for="({ item: s, count }, i) in storageCards"
+                            :key="s.type === 'road' ? 'roads' : s.id"
+                            class="bcard is-stored"
+                            :class="[placingStored && (s.type === 'road' ? placingStored.type === 'road' : placingStored.id === s.id) ? 'is-active' : '', storedCrewIssue(s) ? 'is-dim' : '']"
+                            :data-tip="storedCrewIssue(s) ?? (s.type === 'road' ? 'Free to put back. Click tile after tile to lay them all.' : 'Free to put back. Pick a tile.')"
+                            @click="startPlaceStored(s, true)"
+                        >
+                            <kbd v-if="i < 9" class="bcard-key">{{ i + 1 }}</kbd>
+                            <span v-if="count > 1" class="bcard-count">×{{ count }}</span>
+                            <span class="bcard-art">
+                                <TownIcon v-if="s.type === 'road'" name="i-lucide-route" />
+                                <TownAsset v-else :id="s.type" kind="building" :level="Math.max(1, s.upgradingTo ?? s.level)" />
+                            </span>
+                            <b class="bcard-name">{{ town.catalogById.value.get(s.type)?.name ?? s.type }}</b>
+                            <span class="bcard-cost">{{ s.type === 'road' ? 'Stored' : s.level === 0 ? 'Site' : getTownMonument(s.type) ? `Stage ${s.level}` : `Level ${s.level}` }}</span>
+                            <span v-if="s.paused" class="bcard-meta">
+                                <span><TownIcon name="i-lucide-pause" />{{ formatTownDuration(s.remainingMs) }} left</span>
+                            </span>
+                        </button>
+                    </div>
+                    <div v-else class="strip-cards">
+                        <button
+                            v-for="(c, i) in tierEntries"
+                            :key="c.id"
+                            class="bcard"
+                            :class="[ghostType === c.id && !movingId && !placingStored ? 'is-active' : '', canAfford(town.nextCost.value[c.id] ?? c.cost) && !cardLocked(c) && !countIssue(c.id) && (c.kind === 'road' || (c.kind === 'monument' ? !monumentCrewNote || monumentCredit(c.id) > 0 : buildersFree > 0)) ? '' : 'is-dim']"
+                            :disabled="cardLocked(c)"
+                            :style="{ '--accent': hex(c.color) }"
+                            @click="pickBuild(c.id)"
+                        >
+                            <kbd v-if="i < 9 && !cardLocked(c)" class="bcard-key">{{ i + 1 }}</kbd>
+                            <span v-if="town.countsByType.value[c.id] || c.maxCount" class="bcard-count">×{{ town.countsByType.value[c.id] ?? 0 }}<template v-if="c.maxCount">/{{ c.maxCount }}</template></span>
+                            <span class="bcard-art">
+                                <TownAsset v-if="c.kind !== 'road'" :id="c.id" kind="building" :level="c.kind === 'monument' ? c.maxLevel : 1" />
+                                <TownIcon v-else name="i-lucide-route" />
+                            </span>
+                            <b
+                                class="bcard-name"
+                                :data-tip="c.kind === 'monument' ? (monumentCredit(c.id) ? `Your research carries over: it goes up at stage ${monumentCredit(c.id)} at once, free` : tierLocked(c.tier) ? `Opens at tier ${c.tier}` : countIssue(c.id) ?? c.description) : countIssue(c.id) ?? ((town.countsByType.value[c.id] ?? 0) ? `You own ${town.countsByType.value[c.id]}${c.maxCount ? ` of ${c.maxCount}` : ''} — each extra one costs more` : (c.maxCount ? `A town may run ${c.maxCount}` : ''))"
+                            >{{ c.name }}</b>
+                            <span class="bcard-cost" :class="balance >= (town.nextCost.value[c.id]?.coins ?? c.cost.coins) ? '' : 'bad'">
+                                <TownCoin />{{ formatNumber(town.nextCost.value[c.id]?.coins ?? c.cost.coins) }}
+                            </span>
+                            <span v-if="Object.keys(town.nextCost.value[c.id]?.resources ?? c.cost.resources).length" class="bcard-res">
+                                <span v-for="[id, q] in Object.entries(town.nextCost.value[c.id]?.resources ?? c.cost.resources)" :key="id" :class="(town.inventory.value[id] ?? 0) >= q ? '' : 'bad'">
+                                    <TownAsset :id="id" />{{ formatNumber(q) }}
+                                </span>
+                            </span>
+                            <span class="bcard-meta">
+                                <span v-if="c.kind === 'road' || monumentCredit(c.id)"><TownIcon name="i-lucide-zap" />instant</span>
+                                <span v-else :class="town.boosts.value.build ? 'is-rushed' : ''" :data-tip="`${town.boosts.value.build ? 'Builder\'s rush: double speed. ' : ''}Upgrades take ${formatTownDuration(boostedMs(Math.round(c.upgradeMs * (mood?.buildTime ?? 1))))} and up`">
+                                    <TownIcon name="i-lucide-clock" />{{ formatTownDuration(boostedMs(Math.round(c.buildMs * (mood?.buildTime ?? 1)))) }}
+                                </span>
+                                <span v-if="c.workers"><TownIcon name="i-lucide-users" />{{ c.workers }}</span>
+                                <span v-if="c.popCap"><TownIcon name="i-lucide-house" />+{{ c.popCap }}</span>
+                                <span v-if="c.happiness" :data-tip="`To each home in reach, plus ${c.happinessPerLevel ?? 0} a level`"><TownIcon name="i-lucide-smile" />+{{ c.happiness }}</span>
+                                <span v-if="c.storage"><TownIcon name="i-lucide-package" />+{{ formatNumber(c.storage) }}</span>
+                                <span v-if="c.size" data-tip="Tiles it covers"><TownIcon name="i-lucide-grid-2x2" />{{ c.size }}×{{ c.size }}</span>
+                                <span v-if="monumentCredit(c.id)" class="is-credit"><TownIcon name="i-lucide-gift" />Stage {{ monumentCredit(c.id) }}</span>
+                            </span>
+                            <span v-if="Object.keys(c.outputs).length" class="bcard-io" :class="productionMult > 1 ? 'is-surge' : ''" :data-tip="`Per ${ioUnit(c) === 'day' ? 'day' : 'hour'} at level 1${productionMult > 1 ? ', doubled by the production surge' : ''}`">
+                                <template v-if="Object.keys(c.inputs).length">
+                                    <span v-for="[id, q] in Object.entries(c.inputs)" :key="id">{{ ioRate(q, ioUnit(c)) }}<TownAsset :id="id" /></span>
+                                    <TownIcon name="i-lucide-arrow-right" />
+                                </template>
+                                <span v-for="[id, q] in Object.entries(c.outputs)" :key="id" class="is-out">{{ ioRate(q, ioUnit(c)) }}<TownAsset :id="id" /></span>
+                            </span>
+                        </button>
+                    </div>
+                </div>
+            </Transition>
+
+            <!-- Terrain legend -->
+            <Transition name="fade">
+                <div v-if="terrainOverlay" class="legend g-panel">
+                    <div class="legend-head">
+                        <span class="g-label"><TownIcon name="i-lucide-mountain" />Terrain</span>
+                        <span class="g-tag g-tag-green">+{{ Math.round(TOWN_TERRAIN_BONUS * 100) }}%</span>
+                        <button class="g-icon g-icon-sm ml-auto" aria-label="Close" @click="toggleTerrain"><TownIcon name="i-lucide-x" /></button>
+                    </div>
+                    <div v-for="t in terrainLegend" :key="t.id" class="legend-row" :class="t.boosting ? 'is-boosting' : ''">
+                        <i :style="{ background: t.css }" />
+                        <b>{{ t.name }}</b>
+                        <span>{{ t.description }}</span>
+                    </div>
+                </div>
+            </Transition>
+
+            <!-- Redesign tray: the town, waiting to be put back down -->
+            <Transition name="rise">
+                <div v-if="redesign" class="tray g-panel">
+                    <div class="tray-head">
+                        <span class="g-label"><TownIcon name="i-lucide-pencil-ruler" />Redesign</span>
+                        <span class="tray-progress" :class="trayLeft === 0 ? 'is-done' : ''">{{ draftTotal - trayLeft }}/{{ draftTotal }} placed</span>
+                        <span v-if="redesign.toStore.length" class="tray-progress"><TownIcon name="i-lucide-archive" />{{ redesign.toStore.length }} to storage</span>
+                        <span v-if="newRoadCount" class="tray-progress"><TownCoin />{{ formatNumber(newRoadCost) }} for {{ newRoadCount }} new {{ newRoadCount === 1 ? 'road' : 'roads' }}</span>
+                        <span class="flex-1" />
+                        <button class="g-btn g-btn-sm g-btn-ghost" :disabled="!draftTouched" data-tip="Everything back in the tray" @click="pickUpAll">
+                            <TownIcon name="i-lucide-undo-2" />Pick up all
+                        </button>
+                        <button v-if="town.redesignDraft.value" class="g-btn g-btn-sm g-btn-ghost" :disabled="busy" data-tip="Throw the saved draft away and start again from the town as it is" @click="discardDraft">
+                            <TownIcon name="i-lucide-trash-2" />Discard draft
+                        </button>
+                        <button class="g-btn g-btn-sm" :data-tip="town.redesignDraft.value ? 'Leave. Changes since your last draft save are not kept.' : 'Leave everything as it was. Nothing is saved.'" @click="cancelRedesign">
+                            <TownIcon name="i-lucide-x" />Cancel
+                        </button>
+                        <button
+                            class="g-btn g-btn-sm"
+                            :class="redesignIsDraft ? '' : 'g-btn-primary'"
+                            :disabled="busy || (!redesignIsDraft && !!redesignSaveIssue)"
+                            :data-tip="redesignIsDraft
+                                ? `${trayLeft} still in the tray: this keeps your progress as a draft and leaves the town as it is. Place or store the rest to finish.`
+                                : redesignSaveIssue ?? 'Nothing changes until you confirm'"
+                            @click="askSaveRedesign"
+                        >
+                            <TownIcon :name="redesignIsDraft ? 'i-lucide-save' : 'i-lucide-check'" />{{ redesignIsDraft ? 'Save draft' : 'Save layout' }}
+                        </button>
+                        <button
+                            v-if="redesignIsDraft"
+                            class="g-btn g-btn-sm g-btn-primary"
+                            :disabled="busy || !!redesignSaveIssue"
+                            :data-tip="redesignSaveIssue ?? `Save the layout now and put the ${trayLeft} still in the tray into storage`"
+                            @click="saveAndStoreSurplus"
+                        >
+                            <TownIcon name="i-lucide-archive" />Save and store surplus
+                        </button>
+                    </div>
+                    <div class="tray-items">
+                        <button
+                            class="tray-item"
+                            :class="trayPick === 'road' ? 'is-active' : ''"
+                            :data-tip="trayRoads.length ? 'Roads left in the tray go into storage when you save.' : storedRoadsLeft.length ? 'Laid from storage first, for free.' : undefined"
+                            @click="pickTray('road')"
+                        >
+                            <span class="tray-art"><TownIcon name="i-lucide-route" /></span>
+                            <b>Road</b>
+                            <span v-if="trayRoads.length + storedRoadsLeft.length" class="tray-count">×{{ trayRoads.length + storedRoadsLeft.length }}</span>
+                            <span v-else class="tray-sub"><TownCoin />{{ formatNumber(townPlaceCost(ROAD_DEF, redesignBuildings.filter(b => b.type === 'road').length).coins) }} each</span>
+                        </button>
+                        <button v-for="g in trayGroups" :key="g.key" class="tray-item" :class="[trayPick === g.key ? 'is-active' : '', g.stored ? 'is-stored' : '']" :data-tip="g.stored ? 'From storage. Left in the tray, it stays there.' : undefined" @click="pickTray(g.key)">
+                            <span class="tray-art"><TownAsset :id="g.type" kind="building" :level="Math.max(1, g.level)" /></span>
+                            <b>{{ g.name }}</b>
+                            <span class="tray-sub"><TownIcon v-if="g.stored" name="i-lucide-archive" />{{ g.site ? 'site' : `L${g.level}` }}</span>
+                            <span class="tray-count">×{{ g.ids.length }}</span>
+                            <span
+                                v-if="!g.stored"
+                                class="tray-store"
+                                role="button"
+                                tabindex="0"
+                                :aria-label="`Send one ${g.name} to storage`"
+                                data-tip="One to storage on save. Shift-click: all of them."
+                                @click.stop="markForStorage($event.shiftKey ? g.ids : g.ids.slice(0, 1))"
+                                @keydown.enter.stop.prevent="markForStorage(g.ids.slice(0, 1))"
+                            ><TownIcon name="i-lucide-archive" /></span>
+                        </button>
+                        <button v-for="g in markedGroups" :key="`marked:${g.key}`" class="tray-item is-marked" data-tip="Goes into storage on save. Click to put one back in the tray." @click="unmarkStorage(g.ids.slice(0, 1))">
+                            <span class="tray-art"><TownAsset :id="g.type" kind="building" :level="Math.max(1, g.level)" /></span>
+                            <b>{{ g.name }}</b>
+                            <span class="tray-sub"><TownIcon name="i-lucide-archive" />to storage</span>
+                            <span class="tray-count">×{{ g.ids.length }}</span>
+                        </button>
+                        <p v-if="trayGroups.length === 0 && markedGroups.length === 0" class="tray-empty">Every building is down. Add roads, or save.</p>
+                    </div>
+                </div>
+            </Transition>
+
+            <!-- Dock -->
+            <div v-if="!redesign" class="dock g-panel">
+                <button class="dock-btn" :class="buildOpen ? 'is-active' : ''" @click="toggleBuild">
+                    <TownIcon name="i-lucide-hammer" class="dock-ico" /><span>Build</span><kbd>B</kbd>
+                    <span v-if="Object.keys(town.monumentCredit.value).length" class="dock-dot" data-tip="Your research carried over: a monument is waiting to be placed" />
+                </button>
+                <button class="dock-btn" :class="windowOpen === 'market' ? 'is-active' : ''" @click="openMarket()">
+                    <TownIcon name="i-lucide-store" class="dock-ico" /><span>Market</span><kbd>H</kbd>
+                </button>
+                <button class="dock-btn" :class="windowOpen === 'daily' ? 'is-active' : ''" data-fx-home @click="openWindow('daily')">
+                    <TownIcon name="i-lucide-calendar-check" class="dock-ico" /><span>Daily</span><kbd>Y</kbd>
+                    <span v-if="dailyBadge" class="dock-badge">{{ dailyBadge }}</span>
+                </button>
+                <button class="dock-btn" :class="windowOpen === 'goals' ? 'is-active' : ''" @click="openWindow('goals')">
+                    <TownIcon name="i-lucide-trophy" class="dock-ico" /><span>Goals</span><kbd>T</kbd>
+                    <span v-if="claimable" class="dock-badge">{{ claimable }}</span>
+                </button>
+                <button class="dock-btn" :class="windowOpen === 'land' ? 'is-active' : ''" @click="openWindow('land')">
+                    <TownIcon name="i-lucide-map" class="dock-ico" /><span>Land</span><kbd>P</kbd>
+                </button>
+                <button class="dock-btn" :class="windowOpen === 'mayors' ? 'is-active' : ''" @click="openWindow('mayors')">
+                    <TownIcon name="i-lucide-crown" class="dock-ico" /><span>Mayors</span><kbd>L</kbd>
+                </button>
+            </div>
+
+            <!-- Windows -->
+            <Transition name="fade">
+                <div v-if="windowOpen" class="backdrop" @click.self="closeAll">
+                    <div class="g-window" :class="windowOpen === 'market' || windowOpen === 'daily' ? 'is-wide' : windowOpen === 'events' ? 'is-small' : ''">
+                        <TownMarketPanel
+                            v-if="windowOpen === 'market'"
+                            :resources="town.resources.value"
+                            :inventory="town.inventory.value"
+                            :last-prices="town.lastPrices.value"
+                            :my-orders="town.myOrders.value"
+                            :balance="balance"
+                            :initial-resource="marketResource"
+                            :busy="busy"
+                            :net-per-tick="town.boostedNetPerTick.value"
+                            :speed-multiplier="speed"
+                            :tick-ms="town.constants.value.tickMs"
+                            :storage-cap="storageCap"
+                            :market-day-until="town.boosts.value.market"
+                            :market-bonus-left="town.marketBonusLeft.value"
+                            @close="closeAll"
+                            @sell-floor="sellFloor"
+                            @sell-bulk="sellBulk"
+                            @place-order="placeOrder"
+                            @cancel-order="cancelOrder"
+                        />
+                        <div v-else-if="windowOpen === 'daily'" class="flex h-full min-h-0 flex-col">
+                            <div class="g-window-head">
+                                <h2><TownIcon name="i-lucide-calendar-check" />Daily</h2>
+                                <button class="g-icon g-icon-sm" aria-label="Close" @click="closeAll"><TownIcon name="i-lucide-x" /></button>
+                            </div>
+                            <div class="g-window-body space-y-3">
+                                <TownStreakPanel @claimed="onStreakChanged" @reset="onStreakChanged" />
+                                <TownContractsPanel :busy="busy" :resource-by-id="town.resourceById.value" :inventory="town.inventory.value" @delivered="onContractDelivered" @bonus="town.refresh()" />
+                            </div>
+                        </div>
+                        <TownMilestonesPanel v-else-if="windowOpen === 'goals'" :milestones="town.milestones.value" :busy="busy" @claim="claimMilestone" @close="closeAll" />
+                        <TownLeaderboardPanel v-else-if="windowOpen === 'mayors'" @close="closeAll" />
+                        <TownEventsPanel v-else-if="windowOpen === 'events'" :catalog-by-id="town.catalogById.value" :resource-by-id="town.resourceById.value" :tick="stateTick" @close="closeAll" />
+
+                        <div v-else-if="windowOpen === 'land'" class="flex h-full min-h-0 flex-col">
+                            <div class="g-window-head">
+                                <h2><TownIcon name="i-lucide-map" />Land <span class="g-tag">{{ town.plots.value.length }}/{{ town.constants.value.maxPlots }}</span></h2>
+                                <button class="g-icon g-icon-sm ml-auto" aria-label="Close" @click="closeAll"><TownIcon name="i-lucide-x" /></button>
+                            </div>
+                            <div class="g-window-body space-y-3">
+                                <div class="g-sec">
+                                    <header>
+                                        <span>Yours, free to sell</span>
+                                        <span data-tip-below="A plot has to be completely empty before you can sell or list it.">{{ emptyPlots.length }} of {{ town.plots.value.length }}</span>
+                                    </header>
+                                    <p v-if="emptyPlots.length === 0" class="g-empty">Every plot has something on it.</p>
+                                    <div v-for="p in emptyPlots" :key="p.id" class="g-row plotrow">
+                                        <TownIcon name="i-lucide-land-plot" class="plot-ico" />
+                                        <div class="min-w-0 flex-1">
+                                            <b>{{ p.x }}, {{ p.y }}</b>
+                                            <div v-if="p.listPrice !== null" class="plotrow-sub is-gold">Listed · {{ formatNumber(p.listPrice) }}</div>
+                                            <div v-else class="plotrow-sub">Office pays {{ formatNumber(p.refund) }}</div>
+                                        </div>
+                                        <template v-if="p.listPrice === null">
+                                            <span v-if="amountPreview(listingPrices[p.id])" class="plotrow-sub is-gold">{{ amountPreview(listingPrices[p.id]) }}</span>
+                                            <input v-model="listingPrices[p.id]" autocomplete="off" placeholder="Ask" class="g-input w-24">
+                                            <button class="g-btn g-btn-sm" :disabled="busy" data-tip="Offer it to the mayors next to you at your price." @click="listPlotForSale(p.id)">List</button>
+                                            <button class="g-btn g-btn-sm" :disabled="busy || p.refund <= 0" :data-tip="p.refund > 0 ? 'Sell back to the land office now.' : 'This plot was free — the office pays nothing.'" @click="confirmSellPlot = p.id">Sell</button>
+                                        </template>
+                                        <button v-else class="g-btn g-btn-sm" :disabled="busy" @click="unlistPlot(p.id)">Unlist</button>
+                                    </div>
+                                </div>
+
+                                <div class="g-sec">
+                                    <header>
+                                        <span>For sale near you</span>
+                                        <span>{{ town.world.value.listings.length }}</span>
+                                    </header>
+                                    <p v-if="town.world.value.listings.length === 0" class="g-empty">{{ town.worldLoaded.value ? 'Nobody next to you is selling.' : 'Looking around…' }}</p>
+                                    <div v-for="l in town.world.value.listings" :key="l.plotId" class="g-row plotrow">
+                                        <TownIcon name="i-lucide-map-pinned" class="plot-ico" />
+                                        <div class="min-w-0 flex-1">
+                                            <b>{{ l.x }}, {{ l.y }}</b>
+                                            <div class="plotrow-sub truncate">{{ l.ownerName }}</div>
+                                        </div>
+                                        <b class="plotrow-price"><TownCoin />{{ formatNumber(l.price) }}</b>
+                                        <button class="g-btn g-btn-gold g-btn-sm" :disabled="busy || balance < l.price" @click="onSelectListing({ id: l.plotId, ownerName: l.ownerName, price: l.price })">Buy</button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </Transition>
+
+            <!-- Welcome back -->
+            <Transition name="fade">
+                <div v-if="welcome" class="backdrop" @click.self="welcome = null">
+                    <div class="g-window is-small welcome" :class="{ 'is-calm': motion.reduced.value }">
+                        <div class="welcome-hero">
+                            <button class="g-icon g-icon-sm welcome-close" aria-label="Close" @click="welcome = null"><TownIcon name="i-lucide-x" /></button>
+                            <span class="welcome-sun" aria-hidden="true" />
+                            <p class="welcome-kicker"><TownIcon name="i-lucide-clock" />Away for {{ formatTownDuration(welcome.elapsedMs) }}</p>
+                            <h2 class="welcome-title">Welcome back, mayor</h2>
+                            <p v-if="welcomeValue" class="welcome-total">
+                                <TownCoin /><b>{{ formatNumber(welcomeShownValue) }}</b>
+                            </p>
+                            <p v-if="welcomeValue" class="welcome-total-sub">made while you were gone, at floor price</p>
+                        </div>
+                        <div class="g-window-body space-y-3">
+                            <div class="welcome-grid" :style="{ gridTemplateColumns: `repeat(${Math.min(3, Math.max(1, welcomeGains.length))}, minmax(0, 1fr))` }">
+                                <div v-for="(r, i) in welcomeGains" :key="r.id" class="g-cell welcome-cell" :style="{ animationDelay: `${120 + i * 45}ms` }">
+                                    <span class="welcome-art"><TownAsset :id="r.def?.id" /></span>
+                                    <b class="is-up">+{{ formatNumber(r.qty) }}</b>
+                                    <span class="g-sub">{{ r.def?.name }}</span>
+                                </div>
+                            </div>
+                            <div v-if="welcomeLosses.length" class="welcome-used">
+                                <span class="g-label">Used up</span>
+                                <span v-for="r in welcomeLosses" :key="r.id" class="welcome-used-item">
+                                    <TownAsset :id="r.def?.id" />{{ formatNumber(r.qty) }}
+                                </span>
+                            </div>
+                            <div class="g-actions">
+                                <button class="g-btn g-btn-ghost" @click="welcome = null">Close</button>
+                                <button class="g-btn g-btn-primary" @click="welcome = null; openMarket()">
+                                    <TownIcon name="i-lucide-store" />Market
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </Transition>
+
+            <!-- Help -->
+            <Transition name="fade">
+                <div v-if="helpOpen" class="backdrop" @click.self="helpOpen = false">
+                    <div class="g-window">
+                        <div class="g-window-head">
+                            <h2>How to play</h2>
+                            <button class="g-icon g-icon-sm ml-auto" aria-label="Close" @click="helpOpen = false"><TownIcon name="i-lucide-x" /></button>
+                        </div>
+                        <div class="g-window-body help space-y-3">
+                            <div class="g-sec">
+                                <header>The town</header>
+                                <dl>
+                                    <dt><TownIcon name="i-lucide-house" />Houses</dt>
+                                    <dd>Two residents per level. Every workshop needs residents — an unstaffed farm grows nothing.</dd>
+                                    <dt><TownIcon name="i-lucide-route" />Roads</dt>
+                                    <dd>Buildings can be placed without a road, but they only work when their front door touches one. People walk to work along roads, so a road network only staffs the workshops it reaches. <kbd>R</kbd> rotates; buildings auto-face a road. Moving is free.</dd>
+                                    <dt><TownIcon name="i-lucide-smile" />Happiness</dt>
+                                    <dd>A score out of 100 that sets production speed. Starts at 55. Each home gains up to 48 from the parks in reach and loses without limit to the workshops in reach; the town feels the average across its residents. Needs add or subtract. The mood chip shows every line.</dd>
+                                    <dt><TownIcon name="i-lucide-utensils" />Needs</dt>
+                                    <dd>Residents eat grain and bread, then want bricks, tools and luxuries. A need only counts once you could make it; after that, going without costs happiness. The goods are really consumed.</dd>
+                                    <dt><TownIcon name="i-lucide-ruler" />Radius</dt>
+                                    <dd>A park cheers only the homes within 4 tiles, most of it the day it opens and a little more per level; a bathhouse reaches 5 and a theatre 7. Industry sours the homes around it, further and harder at every tier. The square on the ground shows the reach while placing.</dd>
+                                </dl>
+                            </div>
+
+                            <div class="g-sec">
+                                <header>Growing</header>
+                                <dl>
+                                    <dt><TownIcon name="i-lucide-layers" />Tiers</dt>
+                                    <dd>Raw goods → refined goods → bread and tools → steel, machines and luxuries. Finish one building of a tier to unlock the next.</dd>
+                                    <dt><TownIcon name="i-lucide-arrow-up" />Levels</dt>
+                                    <dd>Most cap at 20, a park at 12, a warehouse at 16. Upgrades cost coins and goods, and the goods climb faster.</dd>
+                                    <dt><TownIcon name="i-lucide-hammer" />Builders</dt>
+                                    <dd>One crew per build or upgrade, three to start; roads are instant. Three more can be hired for gems, and <TownIcon name="i-lucide-gem" class="is-gem" /> rush costs 1 gem per hour left.</dd>
+                                    <dt><TownIcon name="i-lucide-truck" />Supply</dt>
+                                    <dd>A workshop wants its inputs a short walk away, counted in <b>road tiles</b>, so the shape of your streets sets its speed. Supply is finite — one lumber camp cannot feed five sawmills, and the closest pairing wins.</dd>
+                                    <dt><TownIcon name="i-lucide-package" />Storage</dt>
+                                    <dd>Caps each good. Full storage halts production — sell, or build warehouses.</dd>
+                                    <dt><TownIcon name="i-lucide-mountain" />Terrain</dt>
+                                    <dd>Soil, woodland and rock make the matching building a quarter faster; water cannot be built on. <kbd>G</kbd> shows the map.</dd>
+                                    <dt><TownIcon name="i-lucide-landmark" />Monuments</dt>
+                                    <dd>Five wonders, one of each, raised in eight stages by their own crew. Every stage adds a town-wide perk: output, build speed, supply reach, happiness and residents, storage.</dd>
+                                </dl>
+                            </div>
+
+                            <div class="g-sec">
+                                <header>Coins</header>
+                                <dl>
+                                    <dt><TownIcon name="i-lucide-store" />Market</dt>
+                                    <dd>There is no passive income — you earn by selling. The town hall always buys at a floor price, but buying is only ever from other mayors.</dd>
+                                    <dt><TownIcon name="i-lucide-map" />Land</dt>
+                                    <dd>One shared realm. The office sells a square next to yours, each dearer and slower than the last. Empty plots go back for a quarter, or list at your own price.</dd>
+                                    <dt><TownIcon name="i-lucide-trophy" />Goals</dt>
+                                    <dd>Pay coins and boosters for hitting town targets.</dd>
+                                </dl>
+                            </div>
+
+                            <div class="g-sec">
+                                <header>Controls</header>
+                                <p class="help-keys">
+                                    Drag to select · shift-drag adds · shift-click toggles one · with a building picked, drag to lay a run
+                                    · middle-drag pans · wheel zooms · right-drag orbits · right-click lets go of what you hold
+                                </p>
+                                <p class="help-keys">
+                                    <kbd>WASD</kbd> move <kbd>Q</kbd><kbd>E</kbd> turn <kbd>R</kbd> rotate (<kbd>Shift</kbd> back) <kbd>M</kbd> move <kbd>U</kbd> upgrade <kbd>Del</kbd> demolish
+                                    <kbd>C</kbd> copy the building under the cursor <kbd>1</kbd>–<kbd>9</kbd> pick a card <kbd>Tab</kbd> next tier
+                                    <kbd>B</kbd> build <kbd>Y</kbd> daily <kbd>H</kbd> market <kbd>T</kbd> goals <kbd>L</kbd> mayors
+                                    <kbd>P</kbd> land <kbd>G</kbd> terrain <kbd>Esc</kbd> back
+                                </p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </Transition>
+
+            <!-- Land purchase confirm -->
+            <Transition name="fade">
+                <div v-if="confirmPlot && plotPurchase" class="backdrop" @click.self="confirmPlot = null">
+                    <div class="g-window is-tiny">
+                        <div class="g-window-head"><h2><TownIcon name="i-lucide-map" />Buy this land?</h2></div>
+                        <div class="g-window-body space-y-3">
+                            <p class="g-copy">Plot #{{ plotPurchase.nextIndex }} at ({{ confirmPlot.x }}, {{ confirmPlot.y }}). The next plot will cost more again.</p>
+                            <div class="g-stat">
+                                <span class="g-label">Price</span>
+                                <b class="is-gold"><TownCoin />{{ formatNumber(plotPurchase.price) }}</b>
+                            </div>
+                            <div class="g-actions">
+                                <button class="g-btn g-btn-ghost" @click="confirmPlot = null">Cancel</button>
+                                <button class="g-btn g-btn-gold" :disabled="busy" @click="confirmBuyPlot">Buy land</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </Transition>
+
+            <!-- Buy a neighbour's plot -->
+            <Transition name="fade">
+                <div v-if="confirmListing" class="backdrop" @click.self="confirmListing = null">
+                    <div class="g-window is-tiny">
+                        <div class="g-window-head"><h2><TownIcon name="i-lucide-handshake" />Buy this land?</h2></div>
+                        <div class="g-window-body space-y-3">
+                            <p class="g-copy">{{ confirmListing.ownerName }} is selling this plot. It has to touch land you already own.</p>
+                            <div class="g-stat">
+                                <span class="g-label">Asking price</span>
+                                <b class="is-gold"><TownCoin />{{ formatNumber(confirmListing.price) }}</b>
+                            </div>
+                            <div class="g-actions">
+                                <button class="g-btn g-btn-ghost" @click="confirmListing = null">Cancel</button>
+                                <button class="g-btn g-btn-gold" :disabled="busy || balance < confirmListing.price" @click="buyListing">Buy land</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </Transition>
+
+            <!-- Sell a plot back to the office -->
+            <Transition name="fade">
+                <div v-if="confirmSellPlot" class="backdrop" @click.self="confirmSellPlot = null">
+                    <div class="g-window is-tiny">
+                        <div class="g-window-head"><h2><TownIcon name="i-lucide-map" />Sell this plot back?</h2></div>
+                        <div class="g-window-body space-y-3">
+                            <p class="g-copy">The office pays {{ Math.round((town.state.value?.plotRefundShare ?? 0.25) * 100) }}% of what you paid. Another mayor may pay more.</p>
+                            <div class="g-stat">
+                                <span class="g-label">Refund</span>
+                                <b class="is-gold"><TownCoin />{{ formatNumber(sellPlotRefund) }}</b>
+                            </div>
+                            <div class="g-actions">
+                                <button class="g-btn g-btn-ghost" @click="confirmSellPlot = null">Cancel</button>
+                                <button class="g-btn g-btn-danger" :disabled="busy" @click="sellPlotBack">Sell back</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </Transition>
+
+            <!-- Every crew is busy -->
+            <Transition name="fade">
+                <div v-if="blocked" class="backdrop" @click.self="blocked = null">
+                    <div class="g-window is-tiny">
+                        <div class="g-window-head">
+                            <h2><TownIcon name="i-lucide-hammer" />Every builder is busy</h2>
+                            <button class="g-icon g-icon-sm ml-auto" aria-label="Close" @click="blocked = null"><TownIcon name="i-lucide-x" /></button>
+                        </div>
+                        <div class="g-window-body space-y-3">
+                            <p class="g-copy">All {{ town.builders.value.total }} crews are on a job. Free one up, or wait.</p>
+                            <div v-if="blockedCheapest" class="g-stat">
+                                <span class="blocked-art"><TownAsset :id="blockedCheapest.type" kind="building" :level="blockedCheapest.level" /></span>
+                                <div class="min-w-0 flex-1">
+                                    <b>{{ blockedCheapest.name }}</b>
+                                    <div class="g-sub">{{ blockedCheapest.first ? 'Building' : `Upgrading to ${blockedCheapest.level}` }} · {{ formatTownDuration(blockedCheapest.remainingMs) }} left</div>
+                                </div>
+                                <b class="is-gem"><TownIcon name="i-lucide-gem" />{{ blockedCheapest.gems }}</b>
+                            </div>
+                            <div class="g-actions">
+                                <button class="g-btn g-btn-ghost" @click="blocked = null">Wait</button>
+                                <button v-if="town.builders.value.nextGemCost !== null" class="g-btn" @click="blocked = null; openBuilders()">Hire a crew</button>
+                                <button v-if="blockedCheapest" class="g-btn g-btn-gem" :disabled="busy || gemsShort(blockedCheapest.gems)" @click="rushAndContinue">Rush &amp; continue</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </Transition>
+
+            <!-- Hire a builder -->
+            <Transition name="fade">
+                <div v-if="buildersOpen" class="backdrop" @click.self="buildersOpen = false">
+                    <div class="g-window is-tiny">
+                        <div class="g-window-head"><h2><TownIcon name="i-lucide-hammer" />Hire a builder</h2></div>
+                        <div class="g-window-body space-y-3">
+                            <p class="g-copy">Each crew works one build or upgrade at a time. Hired for good.</p>
+                            <div class="g-stat">
+                                <span class="g-label">{{ town.builders.value.owned }} → {{ town.builders.value.owned + 1 }} crews</span>
+                                <b class="is-gem"><TownIcon name="i-lucide-gem" />{{ town.builders.value.nextGemCost }}</b>
+                            </div>
+                            <div class="g-actions">
+                                <button class="g-btn g-btn-ghost" @click="buildersOpen = false">Cancel</button>
+                                <button class="g-btn g-btn-gem" :disabled="busy || gemsShort(town.builders.value.nextGemCost ?? 0)" @click="hireBuilder">Hire</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </Transition>
+
+            <!-- Redesign save confirm -->
+            <Transition name="fade">
+                <div v-if="confirmRedesign" class="backdrop" @click.self="confirmRedesign = null">
+                    <div class="g-window is-small">
+                        <div class="g-window-head"><h2><TownIcon name="i-lucide-pencil-ruler" />Save this layout?</h2></div>
+                        <div class="g-window-body space-y-3">
+                            <p class="g-copy">
+                                Every building moves to where you put it — all {{ confirmRedesign.moves.length }} at once. Builds and upgrades in
+                                progress keep their clocks. Moving is free.
+                            </p>
+                            <p v-if="confirmRedesign.store.length" class="g-copy">
+                                {{ confirmRedesign.store.length }} {{ confirmRedesign.store.length === 1 ? 'piece goes' : 'pieces go' }} into storage<template v-if="trayRoads.length">, {{ trayRoads.length }} of them {{ trayRoads.length === 1 ? 'a road' : 'roads' }} left in the tray</template>.
+                                Stored builds and upgrades pause, and their crews are freed.
+                            </p>
+                            <p v-if="confirmRedesign.place.length" class="g-copy">
+                                {{ confirmRedesign.place.length }} {{ confirmRedesign.place.length === 1 ? 'building comes' : 'buildings come' }} back out of storage.
+                            </p>
+                            <p v-if="confirmRedesign.roads.length" class="g-copy">
+                                {{ confirmRedesign.roads.length }} new {{ confirmRedesign.roads.length === 1 ? 'road' : 'roads' }} for <TownCoin /> {{ formatNumber(newRoadCost) }}.
+                            </p>
+                            <p v-if="draftDoorless" class="card-note is-warn">
+                                <TownIcon name="i-lucide-door-closed" />
+                                {{ draftDoorless }} {{ draftDoorless === 1 ? 'building has' : 'buildings have' }} no road at the front door and will stop working until one reaches {{ draftDoorless === 1 ? 'it' : 'them' }}.
+                            </p>
+                            <div class="g-actions">
+                                <button class="g-btn g-btn-ghost" @click="confirmRedesign = null">Keep editing</button>
+                                <button class="g-btn g-btn-primary" :disabled="busy" @click="saveRedesign">
+                                    <TownIcon name="i-lucide-check" />Save layout
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </Transition>
+
+            <!-- Bulk demolish confirm -->
+            <Transition name="fade">
+                <div v-if="confirmBulk" class="backdrop" @click.self="confirmBulk = null">
+                    <div class="g-window is-tiny">
+                        <div class="g-window-head"><h2>Demolish {{ confirmBulk.ids.length }} {{ confirmBulk.ids.length === 1 ? 'building' : 'buildings' }}?</h2></div>
+                        <div class="g-window-body space-y-3">
+                            <p class="g-copy">No refund. Every tile becomes free again.</p>
+                            <div class="g-actions">
+                                <button class="g-btn g-btn-ghost" @click="confirmBulk = null">Cancel</button>
+                                <button class="g-btn g-btn-danger" :disabled="busy" @click="demolishBulk">
+                                    <TownIcon name="i-lucide-trash-2" />Demolish
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </Transition>
+
+            <!-- Demolish confirm -->
+            <Transition name="fade">
+                <div v-if="confirmDemolish" class="backdrop" @click.self="confirmDemolish = false">
+                    <div class="g-window is-tiny">
+                        <div class="g-window-head"><h2>Demolish {{ selectedEntry?.name }}?</h2></div>
+                        <div class="g-window-body space-y-3">
+                            <p class="g-copy">No refund. The tile becomes free again.</p>
+                            <div class="g-actions">
+                                <button class="g-btn g-btn-ghost" @click="confirmDemolish = false">Cancel</button>
+                                <button class="g-btn g-btn-danger" @click="demolishSelected">
+                                    <TownIcon name="i-lucide-trash-2" />Demolish
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </Transition>
+        </template>
+
+        <!-- Reward effects: above every window and backdrop, never in the way of a click. -->
+        <TownFx />
+        <!-- Chest opening: takes over the whole game area, above everything else in it. -->
+        <TownChestOpening />
+    </div>
+</template>
+
+<style>
+/* ── Polytown game UI ─────────────────────────────────────────────────────────
+   Tokens and shared .g-* primitives live here and here only; every other
+   town/* component consumes them and adds scoped rules of its own.
+   Light is the base theme, dark overrides the tokens — no white-glass fills. */
+
+.town-root {
+    /* surfaces */
+    --g-bg: rgba(251, 249, 244, 0.94);
+    --g-bg-2: rgba(255, 255, 255, 0.98);
+    --g-fill: rgba(34, 28, 16, 0.045);
+    --g-fill-2: rgba(34, 28, 16, 0.085);
+    --g-line: rgba(34, 28, 16, 0.10);
+    --g-line-2: rgba(34, 28, 16, 0.20);
+    /* text */
+    --g-text: #1f1c16;
+    --g-text-2: rgba(31, 28, 22, 0.70);
+    --g-muted: rgba(31, 28, 22, 0.50);
+    /* semantic */
+    --g-accent: var(--ui-primary);
+    --g-accent-fg: #fff;
+    --g-gold: #a8730c;
+    --g-gold-bg: rgba(212, 160, 23, 0.14);
+    --g-green: #1e8e4b;
+    --g-green-bg: rgba(30, 142, 75, 0.12);
+    --g-red: #c8443c;
+    --g-red-bg: rgba(200, 68, 60, 0.12);
+    --g-gem: #1d7fc2;
+    --g-gem-bg: rgba(29, 127, 194, 0.12);
+    --g-warn: #b7791f;
+    --g-warn-bg: rgba(183, 121, 31, 0.14);
+    /* shape */
+    --g-radius: 14px;
+    --g-radius-sm: 9px;
+    --g-radius-xs: 6px;
+    --g-shadow: 0 8px 24px rgba(40, 30, 10, 0.12), 0 1px 2px rgba(40, 30, 10, 0.08);
+    --g-shadow-lg: 0 24px 60px rgba(40, 30, 10, 0.18), 0 2px 6px rgba(40, 30, 10, 0.08);
+    --g-blur: blur(14px);
+    --g-font-display: ui-serif, 'Iowan Old Style', 'Palatino Linotype', Georgia, serif;
+
+    position: relative;
+    height: min(100%, 100svh);
+    width: 100%;
+    overflow: hidden;
+    color: var(--g-text);
+    font-family: inherit;
+    background: #8ecbe8;
+}
+
+.dark .town-root {
+    --g-bg: rgba(22, 24, 29, 0.94);
+    --g-bg-2: rgba(28, 31, 37, 0.97);
+    --g-fill: rgba(255, 255, 255, 0.055);
+    --g-fill-2: rgba(255, 255, 255, 0.10);
+    --g-line: rgba(255, 255, 255, 0.09);
+    --g-line-2: rgba(255, 255, 255, 0.20);
+    --g-text: #f1eee7;
+    --g-text-2: rgba(241, 238, 231, 0.70);
+    --g-muted: rgba(241, 238, 231, 0.50);
+    --g-accent-fg: #0b1a10;
+    --g-gold: #f0c257;
+    --g-gold-bg: rgba(240, 194, 87, 0.16);
+    --g-green: #5ad77a;
+    --g-green-bg: rgba(90, 215, 122, 0.14);
+    --g-red: #ff7b72;
+    --g-red-bg: rgba(255, 123, 114, 0.14);
+    --g-gem: #6cc8ff;
+    --g-gem-bg: rgba(108, 200, 255, 0.14);
+    --g-warn: #f0b34d;
+    --g-warn-bg: rgba(240, 179, 77, 0.16);
+    --g-shadow: 0 8px 24px rgba(0, 0, 0, 0.35), 0 1px 2px rgba(0, 0, 0, 0.3);
+    --g-shadow-lg: 0 24px 60px rgba(0, 0, 0, 0.5), 0 2px 6px rgba(0, 0, 0, 0.3);
+    background: #1b2430;
+}
+
+.town-root :is(b, strong) { font-weight: 650; }
+.town-root .bad { color: var(--g-red); }
+.town-root .is-gold { color: var(--g-gold); }
+.town-root .is-green { color: var(--g-green); }
+.town-root .is-gem { color: var(--g-gem); }
+.town-root .is-up { color: var(--g-green); }
+.town-root .is-down { color: var(--g-red); }
+
+/* Small trailing detail next to a value: "/100", "/day if sold", unit names. */
+:where(.town-root) .g-sub { color: var(--g-muted); font-weight: 500; font-size: 0.85em; }
+
+/* ── Surfaces ───────────────────────────────────────────────────────────── */
+:where(.town-root) .g-panel {
+    background: var(--g-bg);
+    border: 1px solid var(--g-line);
+    backdrop-filter: var(--g-blur);
+    box-shadow: var(--g-shadow);
+    border-radius: var(--g-radius);
+}
+
+:where(.town-root) .g-window {
+    width: min(680px, 100%);
+    max-height: 100%;
+    display: flex;
+    flex-direction: column;
+    border-radius: 18px;
+    background: var(--g-bg-2);
+    border: 1px solid var(--g-line);
+    box-shadow: var(--g-shadow-lg);
+    overflow: hidden;
+}
+:where(.town-root) .g-window.is-wide { width: min(920px, 100%); height: min(680px, 100%); }
+:where(.town-root) .g-window.is-small { width: min(520px, 100%); }
+:where(.town-root) .g-window.is-tiny { width: min(400px, 100%); }
+
+:where(.town-root) .g-window-head {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--g-line);
+}
+:where(.town-root) .g-window-head h2 {
+    margin-right: auto;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-family: var(--g-font-display);
+    font-size: 18px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+}
+:where(.town-root) .g-window-head h2 > .iconify { color: var(--g-muted); }
+:where(.town-root) .g-window-body { padding: 16px; overflow-x: hidden; overflow-y: auto; }
+
+:where(.town-root) .g-sec {
+    background: var(--g-fill);
+    border: 1px solid var(--g-line);
+    border-radius: var(--g-radius);
+    padding: 12px 14px;
+}
+:where(.town-root) .g-sec > header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 8px;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--g-muted);
+}
+/* A second child is the header's right slot: a count, not another label. */
+:where(.town-root) .g-sec > header > span + span {
+    letter-spacing: 0;
+    text-transform: none;
+    font-weight: 600;
+    font-size: 11.5px;
+    color: var(--g-text-2);
+}
+
+:where(.town-root) .g-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 10.5px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--g-muted);
+}
+
+:where(.town-root) .g-copy { font-size: 13px; line-height: 1.55; color: var(--g-text-2); }
+:where(.town-root) .g-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+/* Label left, one number right — the figure every confirm modal shows. */
+:where(.town-root) .g-stat {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    border-radius: var(--g-radius-sm);
+    background: var(--g-fill);
+    border: 1px solid var(--g-line);
+}
+:where(.town-root) .g-stat > b {
+    margin-left: auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 17px;
+    font-variant-numeric: tabular-nums;
+}
+
+:where(.town-root) .g-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 10px;
+    border-radius: var(--g-radius-sm);
+    font-size: 13px;
+}
+:where(.town-root) .g-row:hover { background: var(--g-fill); }
+
+:where(.town-root) .g-cell {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    padding: 10px 6px;
+    border-radius: var(--g-radius-sm);
+    background: var(--g-fill);
+    border: 1px solid var(--g-line);
+    font-variant-numeric: tabular-nums;
+}
+
+:where(.town-root) .g-empty {
+    padding: 12px;
+    border: 1px dashed var(--g-line-2);
+    border-radius: var(--g-radius-sm);
+    font-size: 12px;
+    color: var(--g-muted);
+    text-align: center;
+}
+
+/* ── Buttons ────────────────────────────────────────────────────────────── */
+:where(.town-root) .g-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 9px 14px;
+    border-radius: var(--g-radius-sm);
+    font-weight: 600;
+    font-size: 13px;
+    background: var(--g-fill-2);
+    border: 1px solid var(--g-line);
+    color: var(--g-text);
+    cursor: pointer;
+    white-space: nowrap;
+    transition: transform 0.1s ease, filter 0.15s ease, background 0.15s ease;
+}
+:where(.town-root) .g-btn:hover:not(:disabled) { filter: brightness(1.05); transform: translateY(-1px); }
+:where(.town-root) .g-btn:active:not(:disabled) { transform: none; }
+:where(.town-root) .g-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+:where(.town-root) .g-btn-primary { background: var(--g-accent); border-color: transparent; color: var(--g-accent-fg); }
+:where(.town-root) .g-btn-gold { background: var(--g-gold-bg); color: var(--g-gold); border-color: color-mix(in srgb, var(--g-gold) 40%, transparent); }
+:where(.town-root) .g-btn-gem { background: var(--g-gem-bg); color: var(--g-gem); border-color: color-mix(in srgb, var(--g-gem) 40%, transparent); }
+:where(.town-root) .g-btn-danger { background: var(--g-red-bg); color: var(--g-red); border-color: color-mix(in srgb, var(--g-red) 40%, transparent); }
+:where(.town-root) .g-btn-ghost { background: transparent; border-color: transparent; color: var(--g-text-2); }
+:where(.town-root) .g-btn-ghost:hover:not(:disabled) { background: var(--g-fill); }
+:where(.town-root) .g-btn-sm { padding: 6px 10px; font-size: 12px; border-radius: var(--g-radius-xs); }
+:where(.town-root) .g-btn-xs { padding: 4px 8px; font-size: 11px; border-radius: var(--g-radius-xs); }
+/* Kept for the panels: a text-only danger action inside a list row. */
+:where(.town-root) .g-btn-quiet-danger { background: transparent; border-color: transparent; color: var(--g-red); }
+:where(.town-root) .g-btn-quiet-danger:hover:not(:disabled) { background: var(--g-red-bg); }
+
+:where(.town-root) .g-icon {
+    flex-shrink: 0;
+    width: 36px;
+    height: 36px;
+    border-radius: var(--g-radius-sm);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--g-fill);
+    border: 1px solid var(--g-line);
+    color: var(--g-text-2);
+    font-size: 16px;
+    cursor: pointer;
+    transition: background 0.15s ease, color 0.15s ease;
+}
+:where(.town-root) .g-icon:hover { background: var(--g-fill-2); color: var(--g-text); }
+:where(.town-root) .g-icon-sm { width: 28px; height: 28px; font-size: 14px; }
+:where(.town-root) .g-icon.is-on { border-color: color-mix(in srgb, var(--g-accent) 55%, transparent); color: var(--g-accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--g-accent) 20%, transparent); }
+:where(.town-root) .g-icon.is-armed { border-color: color-mix(in srgb, var(--g-red) 60%, transparent); color: var(--g-red); box-shadow: 0 0 0 2px color-mix(in srgb, var(--g-red) 22%, transparent); }
+:where(.town-root) .g-icon-danger { color: var(--g-red); }
+/* The corner buttons float over the scene, so they carry the panel surface. */
+:where(.town-root) .corner .g-icon { background: var(--g-bg); backdrop-filter: var(--g-blur); box-shadow: var(--g-shadow); }
+
+/* ── Chips, tags, meters ────────────────────────────────────────────────── */
+:where(.town-root) .g-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    height: 36px;
+    padding: 0 12px;
+    border-radius: var(--g-radius);
+    background: var(--g-bg);
+    border: 1px solid var(--g-line);
+    backdrop-filter: var(--g-blur);
+    box-shadow: var(--g-shadow);
+    color: var(--g-text);
+    font-size: 13px;
+    font-weight: 600;
+    white-space: nowrap;
+}
+:where(.town-root) .g-chip b { font-variant-numeric: tabular-nums; }
+:where(.town-root) .g-chip-btn { cursor: pointer; }
+:where(.town-root) .g-chip-btn:hover { background: var(--g-bg-2); }
+:where(.town-root) .g-chip-btn.is-pinned { border-color: var(--g-line-2); background: var(--g-bg-2); }
+:where(.town-root) .g-chip-warn { border-color: color-mix(in srgb, var(--g-warn) 55%, transparent); }
+:where(.town-root) .g-chip-warn b { color: var(--g-warn); }
+:where(.town-root) .g-chip-gold b { color: var(--g-gold); }
+:where(.town-root) .g-chip-gem b { color: var(--g-gem); }
+:where(.town-root) .g-chip-green b { color: var(--g-green); }
+:where(.town-root) .g-ico { width: 15px; height: 15px; flex-shrink: 0; color: var(--g-muted); }
+:where(.town-root) .g-chip .g-ico.is-green { color: var(--g-green); }
+
+:where(.town-root) .g-tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 8px;
+    border-radius: var(--g-radius-xs);
+    background: var(--g-fill-2);
+    color: var(--g-text-2);
+    font-size: 11.5px;
+    font-weight: 600;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+}
+:where(.town-root) .g-tag-green { background: var(--g-green-bg); color: var(--g-green); }
+:where(.town-root) .g-tag-red { background: var(--g-red-bg); color: var(--g-red); }
+:where(.town-root) .g-tag-gold { background: var(--g-gold-bg); color: var(--g-gold); }
+:where(.town-root) .g-tag-gem { background: var(--g-gem-bg); color: var(--g-gem); }
+:where(.town-root) .g-tag-warn { background: var(--g-warn-bg); color: var(--g-warn); }
+
+:where(.town-root) .g-meter {
+    display: inline-block;
+    width: 100%;
+    height: 6px;
+    border-radius: 999px;
+    background: var(--g-fill-2);
+    overflow: hidden;
+}
+:where(.town-root) .g-meter i { display: block; height: 100%; border-radius: 999px; background: var(--g-muted); transition: width 0.6s ease; }
+:where(.town-root) .g-meter i.ok { background: var(--g-green); }
+:where(.town-root) .g-meter i.meh { background: var(--g-warn); }
+:where(.town-root) .g-meter i.bad { background: var(--g-red); }
+:where(.town-root) .g-meter-lg { width: 90px; flex-shrink: 0; position: relative; overflow: visible; }
+/* Specific enough to beat `[data-tip-below] { position: relative }`, which the
+   mark carries and which would otherwise drop it back into the flow. */
+:where(.town-root) .g-meter .g-meter-mark { position: absolute; top: -3px; bottom: -3px; width: 2px; margin-left: -1px; border-radius: 1px; background: var(--g-line-2); }
+
+:where(.town-root) .g-progress { height: 6px; border-radius: 999px; background: var(--g-fill-2); overflow: hidden; }
+:where(.town-root) .g-progress i { display: block; height: 100%; border-radius: 999px; background: var(--g-accent); transition: width 0.4s linear; }
+:where(.town-root) .g-progress i.ok { background: var(--g-green); }
+:where(.town-root) .g-progress i.meh { background: var(--g-warn); }
+:where(.town-root) .g-progress i.bad { background: var(--g-red); }
+
+:where(.town-root) .g-input {
+    height: 34px;
+    padding: 0 10px;
+    border-radius: var(--g-radius-sm);
+    background: var(--g-fill);
+    border: 1px solid var(--g-line);
+    color: var(--g-text);
+    font-size: 13px;
+    font-variant-numeric: tabular-nums;
+}
+:where(.town-root) .g-input::placeholder { color: var(--g-muted); }
+:where(.town-root) .g-input:focus {
+    outline: none;
+    border-color: var(--g-line-2);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--g-accent) 25%, transparent);
+}
+
+:where(.town-root) .g-dot {
+    min-width: 16px;
+    height: 16px;
+    padding: 0 4px;
+    border-radius: 999px;
+    background: var(--g-red);
+    color: #fff;
+    font-size: 10px;
+    font-weight: 700;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.town-root kbd,
+:where(.town-root) .g-kbd {
+    font: 600 10px/1 ui-monospace, SFMono-Regular, monospace;
+    padding: 2px 4px;
+    border-radius: 4px;
+    background: var(--g-fill-2);
+    border: 1px solid var(--g-line);
+    color: var(--g-muted);
+}
+
+:where(.town-root) .g-spinner {
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    border: 2px solid var(--g-line-2);
+    border-top-color: var(--g-text);
+    animation: g-spin 0.8s linear infinite;
+}
+:where(.town-root) .g-spinner-xs { width: 13px !important; height: 13px !important; }
+@keyframes g-spin { to { transform: rotate(360deg); } }
+
+/* Kept for the panels: a compact inline cost readout. */
+:where(.town-root) .g-cost {
+    display: inline-flex;
+    gap: 8px;
+    padding: 3px 8px;
+    border-radius: var(--g-radius-xs);
+    background: var(--g-fill);
+    font-size: 11px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+}
+
+/* ── Tooltips ───────────────────────────────────────────────────────────── */
+:where(.town-root) [data-tip],
+:where(.town-root) [data-tip-below] { position: relative; }
+:where(.town-root) [data-tip]::after,
+:where(.town-root) [data-tip-below]::after {
+    position: absolute;
+    left: 50%;
+    z-index: 40;
+    width: max-content;
+    max-width: 260px;
+    padding: 7px 10px;
+    border-radius: var(--g-radius-sm);
+    background: var(--g-bg-2);
+    border: 1px solid var(--g-line);
+    color: var(--g-text);
+    font-family: inherit;
+    font-size: 11.5px;
+    font-weight: 500;
+    line-height: 1.45;
+    text-align: left;
+    white-space: pre-line;
+    box-shadow: var(--g-shadow);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.12s ease, transform 0.12s ease;
+}
+:where(.town-root) [data-tip]::after { content: attr(data-tip); bottom: calc(100% + 8px); transform: translate(-50%, 4px); }
+:where(.town-root) [data-tip-below]::after { content: attr(data-tip-below); top: calc(100% + 8px); transform: translate(-50%, -4px); }
+:where(.town-root) [data-tip]:hover::after,
+:where(.town-root) [data-tip-below]:hover::after { opacity: 1; transform: translate(-50%, 0); transition-delay: 0.2s; }
+
+/* ── Transitions ────────────────────────────────────────────────────────── */
+:where(.town-root) .fade-enter-active, :where(.town-root) .fade-leave-active { transition: opacity 0.18s ease; }
+:where(.town-root) .fade-enter-from, :where(.town-root) .fade-leave-to { opacity: 0; }
+:where(.town-root) .rise-enter-active, :where(.town-root) .rise-leave-active { transition: opacity 0.18s ease, transform 0.18s ease; }
+:where(.town-root) .rise-enter-from, :where(.town-root) .rise-leave-to { opacity: 0; transform: translate(-50%, 10px); }
+
+/* ── Founding ───────────────────────────────────────────────────────────── */
+:where(.town-root) .found-screen {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    background: #a9d6ea;
+}
+.dark :where(.town-root) .found-screen { background: #16181d; }
+:where(.town-root) .found-card {
+    max-width: 420px;
+    text-align: center;
+    padding: 36px 32px;
+    border-radius: 20px;
+    background: var(--g-bg-2);
+    border: 1px solid var(--g-line);
+    box-shadow: var(--g-shadow-lg);
+}
+:where(.town-root) .found-mark {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 56px;
+    height: 56px;
+    border-radius: var(--g-radius);
+    background: var(--g-fill);
+    border: 1px solid var(--g-line);
+    color: var(--g-accent);
+    font-size: 28px;
+}
+:where(.town-root) .found-title { margin-top: 14px; font-family: var(--g-font-display); font-size: 30px; font-weight: 600; letter-spacing: -0.02em; }
+:where(.town-root) .found-copy { margin-top: 10px; font-size: 13.5px; line-height: 1.6; color: var(--g-text-2); }
+:where(.town-root) .found-go { margin-top: 22px; padding: 11px 20px; font-size: 14px; }
+:where(.town-root) .found-note { margin-top: 10px; font-size: 11.5px; color: var(--g-muted); }
+
+/* ── HUD ────────────────────────────────────────────────────────────────── */
+:where(.town-root) .hud { position: absolute; left: 14px; top: 14px; display: flex; flex-wrap: wrap; gap: 8px; z-index: 5; max-width: calc(100% - 250px); }
+:where(.town-root) .corner { position: absolute; right: 14px; top: 14px; display: flex; gap: 8px; z-index: 5; }
+:where(.town-root) .motion-frame { position: absolute; inset: 0; pointer-events: none; z-index: 2; box-shadow: inset 0 0 120px 30px rgba(10, 14, 20, 0.2); }
+:where(.town-root) .mood-face { font-size: 16px; line-height: 1; }
+:where(.town-root) .mood-face.is-lg { font-size: 24px; }
+
+:where(.town-root) .moodpop {
+    position: absolute;
+    left: 0;
+    top: calc(100% + 8px);
+    z-index: 9;
+    width: 360px;
+    max-height: calc(100vh - 140px);
+    overflow-y: auto;
+    padding: 12px;
+    border-radius: var(--g-radius);
+    background: var(--g-bg-2);
+    border: 1px solid var(--g-line);
+    box-shadow: var(--g-shadow-lg);
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+/* A chip with a hover popover. The bridge under the chip keeps the popover
+   open while the pointer crosses the gap; the popover itself clips, so it
+   cannot carry the bridge. */
+:where(.town-root) .hud-hover { position: relative; }
+:where(.town-root) .hud-hover::after { content: ''; position: absolute; left: 0; right: 0; top: 100%; height: 12px; }
+:where(.town-root) .moodpop.is-income { width: 300px; }
+:where(.town-root) .moodpop.is-builders { width: 320px; }
+:where(.town-root) .moodpop.is-boosters { width: 330px; }
+:where(.town-root) .booster-row {
+    display: grid;
+    grid-template-columns: 24px minmax(0, 1fr) auto auto auto;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 8px;
+    border-radius: var(--g-radius-sm);
+    background: var(--g-bg-3, var(--g-bg));
+    font-size: 12px;
+}
+:where(.town-root) .booster-row .rec-main { display: flex; flex-direction: column; min-width: 0; }
+:where(.town-root) .booster-row .moodpop-sub { margin-top: 0; }
+:where(.town-root) .booster-held { font-variant-numeric: tabular-nums; min-width: 2ch; text-align: right; }
+
+/* ── Boosts ─────────────────────────────────────────────────────────────── */
+/* A running boost wears its colour: a slow shimmer round the border and a
+   soft breathing glow. Still with reduced motion. */
+:where(.town-root) .buff {
+    --buff: var(--g-gold);
+    --buff-edge: color-mix(in srgb, var(--buff) 55%, transparent);
+    gap: 6px;
+    padding: 0 11px 0 8px;
+    border-color: transparent;
+    background:
+        linear-gradient(var(--g-bg), var(--g-bg)) padding-box,
+        linear-gradient(105deg, var(--buff-edge) 0 36%, color-mix(in srgb, var(--buff) 30%, #fff) 50%, var(--buff-edge) 64% 100%) border-box;
+    background-size: 100% 100%, 300% 100%;
+    background-position: 0 0, 100% 0;
+    animation: buff-shimmer 3.6s linear infinite, buff-glow 2.6s ease-in-out infinite;
+    cursor: default;
+}
+:where(.town-root) .buff.is-build { --buff: var(--g-warn); }
+:where(.town-root) .buff.is-production { --buff: var(--g-green); }
+:where(.town-root) .buff.is-market { --buff: var(--g-gold); }
+:where(.town-root) .buff.is-builder { --buff: var(--g-gem); }
+:where(.town-root) .buff .town-boost-icon { flex-shrink: 0; }
+:where(.town-root) .buff-name { font-size: 12px; font-weight: 600; color: var(--g-text-2); }
+:where(.town-root) .buff-time { color: var(--buff); font-variant-numeric: tabular-nums; }
+:where(.town-root) .buff.is-calm { animation: none; background-position: 0 0, 50% 0; }
+/* Chips wrap onto a row of their own at the left edge: hang the tip from the chip's left, not its middle. */
+:where(.town-root) .buff[data-tip-below]::after { left: 0; transform: translateY(-4px); }
+:where(.town-root) .buff[data-tip-below]:hover::after { transform: none; }
+@keyframes buff-shimmer {
+    from { background-position: 0 0, 100% 0; }
+    to { background-position: 0 0, 0% 0; }
+}
+@keyframes buff-glow {
+    0%, 100% { box-shadow: var(--g-shadow), 0 0 0 0 transparent; }
+    50% { box-shadow: var(--g-shadow), 0 0 14px -2px color-mix(in srgb, var(--buff) 55%, transparent); }
+}
+:where(.town-root) .buff-enter-active { transition: opacity 0.2s ease, transform 0.45s cubic-bezier(0.2, 1.6, 0.4, 1); }
+:where(.town-root) .buff-enter-from { opacity: 0; transform: scale(0.55); }
+:where(.town-root) .buff-leave-active { transition: opacity 0.35s ease; }
+:where(.town-root) .buff-leave-to { opacity: 0; }
+:where(.town-root) .buff.is-calm.buff-enter-from { transform: none; }
+@media (prefers-reduced-motion: reduce) {
+    :where(.town-root) .buff { animation: none; background-position: 0 0, 50% 0; }
+    :where(.town-root) .buff-enter-from { transform: none; }
+}
+@media (max-width: 520px) {
+    :where(.town-root) .buff { height: 30px; padding: 0 8px 0 5px; gap: 5px; font-size: 12px; }
+    :where(.town-root) .buff-name { display: none; }
+}
+/* The rate a boost is doubling, marked where it is shown. */
+:where(.town-root) .boost-x {
+    display: inline-block;
+    margin-left: 3px;
+    padding: 0 3px;
+    border-radius: 4px;
+    background: var(--g-green-bg);
+    color: var(--g-green);
+    font-size: 9.5px;
+    font-style: normal;
+    font-weight: 800;
+    line-height: 14px;
+    vertical-align: 1px;
+}
+:where(.town-root) .boost-x.is-build { background: var(--g-warn-bg); color: var(--g-warn); }
+:where(.town-root) .is-rushed { color: var(--g-warn) !important; font-weight: 700; }
+:where(.town-root) .g-progress.is-rushed i { background: linear-gradient(90deg, var(--g-warn), color-mix(in srgb, var(--g-warn) 55%, #fff)); }
+:where(.town-root) .bcard-io.is-surge .is-out { font-weight: 800; }
+:where(.town-root) .crew-temp { color: var(--g-gem); }
+:where(.town-root) .crew-row {
+    display: grid;
+    grid-template-columns: 22px minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 8px;
+    border-radius: var(--g-radius-sm);
+    background: var(--g-gem-bg);
+    font-size: 12px;
+}
+:where(.town-root) .crew-row .rec-main { display: flex; flex-direction: column; min-width: 0; }
+:where(.town-root) .crew-row .moodpop-sub { margin-top: 0; }
+:where(.town-root) .crew-row-time { font-weight: 700; color: var(--g-gem); font-variant-numeric: tabular-nums; }
+:where(.town-root) .moodpop-sub { margin-top: 2px; font-size: 11.5px; color: var(--g-muted); }
+:where(.town-root) .moodpop-foot { font-size: 11px; color: var(--g-muted); }
+:where(.town-root) .moodpop-group { display: flex; flex-direction: column; gap: 4px; }
+:where(.town-root) .moodpop-head { display: flex; align-items: center; gap: 8px; font-size: 14px; }
+:where(.town-root) .moodpop-score { margin-left: auto; font-variant-numeric: tabular-nums; color: var(--g-text-2); }
+:where(.town-root) .moodpop-perks { display: flex; flex-wrap: wrap; gap: 6px; }
+:where(.town-root) .moodpop-next { display: flex; flex-wrap: wrap; gap: 4px 6px; align-items: center; font-size: 11.5px; color: var(--g-text-2); }
+:where(.town-root) .moodpop-next-perk { padding: 1px 6px; border-radius: var(--g-radius-xs); background: var(--g-fill); font-weight: 600; }
+
+:where(.town-root) .rec-row {
+    display: grid;
+    grid-template-columns: 22px minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 6px;
+    border-radius: var(--g-radius-xs);
+    background: var(--g-fill);
+    border: 1px solid var(--g-line);
+    color: var(--g-text);
+    text-align: left;
+    cursor: pointer;
+    transition: background 0.15s ease, border-color 0.15s ease;
+}
+:where(.town-root) .rec-row:hover:not(:disabled) { background: var(--g-fill-2); border-color: var(--g-line-2); }
+/* A job under way: the same row, but nothing to click and a bar instead of a cost. */
+:where(.town-root) .job-row {
+    display: grid;
+    grid-template-columns: 22px minmax(0, 1fr);
+    align-items: center;
+    gap: 8px;
+    padding: 5px 6px;
+    border-radius: var(--g-radius-xs);
+    background: var(--g-fill);
+    border: 1px solid var(--g-line);
+}
+:where(.town-root) .job-head { display: flex; align-items: center; gap: 6px; }
+:where(.town-root) .job-head b { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; font-weight: 600; }
+:where(.town-root) .job-time { font-size: 11px; font-weight: 600; font-variant-numeric: tabular-nums; color: var(--g-text-2); }
+:where(.town-root) .job-bar { height: 4px; margin-top: 3px; }
+:where(.town-root) .rec-row:disabled { cursor: not-allowed; }
+:where(.town-root) .rec-row.is-dim { opacity: 0.55; }
+:where(.town-root) .rec-art { font-size: 12px; line-height: 1; }
+:where(.town-root) .rec-main { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+:where(.town-root) .rec-main b { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; font-weight: 600; }
+:where(.town-root) .rec-meta { display: flex; align-items: center; gap: 5px; }
+:where(.town-root) .rec-level { font-size: 10.5px; color: var(--g-muted); font-variant-numeric: tabular-nums; }
+:where(.town-root) .rec-meta .g-tag { padding: 1px 5px; font-size: 10px; }
+:where(.town-root) .rec-cost { display: flex; flex-wrap: wrap; justify-content: flex-end; max-width: 130px; gap: 2px 7px; font-size: 11px; font-weight: 600; font-variant-numeric: tabular-nums; }
+:where(.town-root) .rec-cost > span { display: inline-flex; align-items: center; gap: 3px; }
+
+:where(.town-root) .income-row { display: grid; grid-template-columns: 18px minmax(0, 1fr) auto auto; align-items: center; gap: 8px; padding: 3px 6px; border-radius: var(--g-radius-xs); font-size: 12px; }
+:where(.town-root) .income-row:hover { background: var(--g-fill); }
+:where(.town-root) .income-row b { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+:where(.town-root) .income-ico { font-size: 12px; line-height: 1; }
+:where(.town-root) .income-rate { font-size: 11px; color: var(--g-muted); font-variant-numeric: tabular-nums; }
+:where(.town-root) .income-value { display: inline-flex; align-items: center; justify-content: flex-end; gap: 4px; min-width: 78px; font-size: 13px; font-weight: 650; color: var(--g-gold); font-variant-numeric: tabular-nums; }
+:where(.town-root) .income-row.is-total { grid-template-columns: 1fr auto; margin-top: 2px; padding-top: 7px; border-top: 1px solid var(--g-line); }
+:where(.town-root) .income-row.is-total:hover { background: none; }
+
+:where(.town-root) .score-row { display: grid; grid-template-columns: 14px 86px 1fr auto; align-items: center; gap: 8px; padding: 4px 6px; border-radius: var(--g-radius-xs); font-size: 12px; }
+:where(.town-root) .score-row.is-plus { background: var(--g-green-bg); }
+:where(.town-root) .score-row.is-minus { background: var(--g-red-bg); }
+:where(.town-root) .score-row b { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+:where(.town-root) .score-ico { width: 14px; height: 14px; color: var(--g-muted); }
+:where(.town-root) .score-hint { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--g-muted); }
+:where(.town-root) .score-points { text-align: right; font-weight: 700; font-variant-numeric: tabular-nums; }
+:where(.town-root) .score-row.is-plus .score-points { color: var(--g-green); }
+:where(.town-root) .score-row.is-minus .score-points { color: var(--g-red); }
+
+:where(.town-root) .needs-row { display: grid; grid-template-columns: 18px 76px 1fr 34px; align-items: center; gap: 8px; padding: 4px 6px; border-radius: var(--g-radius-xs); font-size: 12px; }
+:where(.town-root) .needs-row.is-ok { background: var(--g-green-bg); }
+:where(.town-root) .needs-row.is-bad { background: var(--g-red-bg); }
+:where(.town-root) .needs-ico { font-size: 12px; line-height: 1; }
+:where(.town-root) .needs-note { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--g-muted); }
+:where(.town-root) .needs-badge { text-align: right; font-weight: 700; font-variant-numeric: tabular-nums; }
+:where(.town-root) .needs-row.is-ok .needs-badge { color: var(--g-green); }
+:where(.town-root) .needs-row.is-bad .needs-badge { color: var(--g-red); }
+
+/* ── Placement hint ─────────────────────────────────────────────────────── */
+:where(.town-root) .hint {
+    position: absolute;
+    left: 50%;
+    top: 70px;
+    transform: translateX(-50%);
+    z-index: 5;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    height: 34px;
+    padding: 0 12px;
+    border-radius: 999px;
+    background: var(--g-bg);
+    border: 1px solid var(--g-line);
+    backdrop-filter: var(--g-blur);
+    box-shadow: var(--g-shadow);
+    font-size: 12.5px;
+    white-space: nowrap;
+}
+:where(.town-root) .hint.is-danger { border-color: color-mix(in srgb, var(--g-red) 55%, transparent); color: var(--g-red); }
+:where(.town-root) .hint-note { color: var(--g-muted); }
+:where(.town-root) .hint-quote { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 999px; background: var(--g-gold-bg); color: var(--g-gold); font-weight: 600; font-variant-numeric: tabular-nums; }
+:where(.town-root) .hint-warn { color: var(--g-red); font-weight: 600; }
+:where(.town-root) .hint-btn { display: inline-flex; align-items: center; gap: 4px; padding: 2px 7px; border-radius: var(--g-radius-xs); background: var(--g-fill); color: var(--g-text-2); font-size: 11px; cursor: pointer; }
+:where(.town-root) .hint-btn:hover { background: var(--g-fill-2); color: var(--g-text); }
+
+/* ── Inventory ──────────────────────────────────────────────────────────── */
+:where(.town-root) .inv {
+    position: absolute;
+    left: 14px;
+    top: 62px;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    z-index: 4;
+    max-height: calc(100% - 180px);
+    overflow-x: hidden;
+    overflow-y: auto;
+    scrollbar-width: none;
+    padding-right: 2px;
+}
+:where(.town-root) .inv::-webkit-scrollbar { display: none; }
+:where(.town-root) .inv-row {
+    display: grid;
+    grid-template-columns: 18px 58px 1fr;
+    align-items: center;
+    gap: 7px;
+    height: 30px;
+    padding: 0 9px;
+    border-radius: var(--g-radius-sm);
+    /* Opaque on purpose: blurred grass behind a translucent row reads as a green stain. */
+    background: var(--g-bg-2);
+    border: 1px solid var(--g-line);
+    box-shadow: var(--g-shadow);
+    font-size: 12.5px;
+    text-align: left;
+    color: var(--g-text);
+    cursor: pointer;
+}
+:where(.town-root) .inv-row:hover { background: var(--g-bg-2); }
+:where(.town-root) .inv-ico { font-size: 12px; line-height: 1; }
+:where(.town-root) .inv-num { font-weight: 650; font-variant-numeric: tabular-nums; }
+:where(.town-root) .inv-row.is-full .inv-num { color: var(--g-gold); }
+:where(.town-root) .inv-tail { display: inline-flex; align-items: center; justify-content: flex-end; gap: 4px; }
+:where(.town-root) .inv-full { width: 11px; height: 11px; flex-shrink: 0; color: var(--g-gold); }
+:where(.town-root) .inv-rate { font-size: 10px; font-weight: 600; font-variant-numeric: tabular-nums; }
+:where(.town-root) .inv-rate.up { color: var(--g-green); }
+:where(.town-root) .inv-rate.down { color: var(--g-red); }
+
+/* ── Cursor tooltips ────────────────────────────────────────────────────── */
+/* Driven by --cursor-x/--cursor-y so a mousemove never re-renders the game. */
+:where(.town-root) .tip {
+    position: fixed;
+    z-index: 30;
+    pointer-events: none;
+    padding: 7px 10px;
+    border-radius: var(--g-radius-sm);
+    background: var(--g-bg-2);
+    border: 1px solid var(--g-line);
+    box-shadow: var(--g-shadow);
+    font-size: 12px;
+    max-width: 260px;
+}
+:where(.town-root) .tip.is-cursor { left: var(--cursor-x, 0px); top: var(--cursor-y, 0px); }
+:where(.town-root) .tip b { display: inline-flex; align-items: center; gap: 5px; }
+:where(.town-root) .tip-sub { display: flex; align-items: center; gap: 5px; margin-top: 2px; font-size: 11.5px; color: var(--g-text-2); }
+:where(.town-root) .tip-bad { display: inline-flex; align-items: center; gap: 5px; color: var(--g-red); font-weight: 600; }
+
+/* ── Selection toolbar ──────────────────────────────────────────────────── */
+:where(.town-root) .seltoolbar {
+    position: absolute;
+    left: 50%;
+    bottom: 112px;
+    transform: translateX(-50%);
+    z-index: 6;
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 8px;
+    max-width: calc(100% - 28px);
+    background: var(--g-bg);
+    border: 1px solid var(--g-line);
+    backdrop-filter: var(--g-blur);
+    box-shadow: var(--g-shadow);
+    border-radius: var(--g-radius);
+}
+:where(.town-root) .seltoolbar-count { padding: 0 4px; font-size: 12.5px; font-variant-numeric: tabular-nums; }
+
+/* ── Selected building card ─────────────────────────────────────────────── */
+:where(.town-root) .card {
+    position: absolute;
+    left: 50%;
+    bottom: 112px;
+    transform: translateX(-50%);
+    z-index: 6;
+    width: min(560px, calc(100% - 28px));
+}
+:where(.town-root) .card-head { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-bottom: 1px solid var(--g-line); }
+:where(.town-root) .card-art {
+    flex-shrink: 0;
+    width: 40px;
+    height: 40px;
+    border-radius: var(--g-radius-sm);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 20px;
+}
+:where(.town-root) .card-title { display: flex; align-items: center; gap: 8px; }
+:where(.town-root) .card-title b { font-family: var(--g-font-display); font-size: 16px; }
+:where(.town-root) .card-desc { margin-top: 1px; font-size: 11.5px; line-height: 1.4; color: var(--g-muted); }
+:where(.town-root) .card-body { padding: 10px 12px 12px; display: flex; flex-direction: column; gap: 9px; }
+:where(.town-root) .card-row { display: flex; align-items: center; gap: 10px; }
+:where(.town-root) .card-progress-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 5px; font-size: 12px; font-variant-numeric: tabular-nums; }
+:where(.town-root) .card-stats { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+:where(.town-root) .card-actions { display: flex; gap: 8px; }
+:where(.town-root) .card-maxed { justify-content: center; padding: 6px; }
+:where(.town-root) .card-note { display: flex; align-items: flex-start; gap: 6px; font-size: 11.5px; line-height: 1.45; color: var(--g-red); }
+:where(.town-root) .card-note > .iconify { flex-shrink: 0; margin-top: 2px; }
+:where(.town-root) .card-alert {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 9px 11px;
+    border-radius: var(--g-radius-sm);
+    background: var(--g-red-bg);
+    border: 1px solid color-mix(in srgb, var(--g-red) 40%, transparent);
+    color: var(--g-red);
+    font-size: 12px;
+    line-height: 1.45;
+}
+:where(.town-root) .card-alert > .iconify { flex-shrink: 0; margin-top: 1px; font-size: 15px; }
+
+:where(.town-root) .recipe { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+:where(.town-root) .recipe-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 4px 9px;
+    border-radius: var(--g-radius-xs);
+    font-size: 12.5px;
+    font-weight: 650;
+    font-variant-numeric: tabular-nums;
+}
+:where(.town-root) .recipe-item.is-in { background: var(--g-fill-2); color: var(--g-text-2); }
+:where(.town-root) .recipe-item.is-out { background: var(--g-green-bg); color: var(--g-green); }
+:where(.town-root) .recipe-arrow { color: var(--g-muted); }
+:where(.town-root) .recipe-unit { font-size: 11px; color: var(--g-muted); cursor: help; }
+
+:where(.town-root) .meters { display: flex; flex-direction: column; gap: 6px; }
+:where(.town-root) .meter { display: grid; grid-template-columns: 14px 92px 1fr 38px; align-items: center; gap: 8px; font-size: 12px; cursor: help; }
+:where(.town-root) .meter-ico { width: 14px; height: 14px; color: var(--g-muted); }
+:where(.town-root) .meter-label { color: var(--g-muted); white-space: nowrap; }
+:where(.town-root) .meter-label em { font-style: normal; font-weight: 650; color: var(--g-text-2); }
+:where(.town-root) .meter-value { text-align: right; font-weight: 650; font-variant-numeric: tabular-nums; }
+
+:where(.town-root) .upgrade {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 8px 8px 11px;
+    border-radius: var(--g-radius-sm);
+    background: var(--g-fill);
+    border: 1px solid var(--g-line);
+}
+:where(.town-root) .upgrade-faces { flex: 1; min-width: 0; display: grid; }
+:where(.town-root) .upgrade-info { grid-area: 1 / 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+:where(.town-root) .upgrade-info.is-hidden { visibility: hidden; pointer-events: none; }
+:where(.town-root) .upgrade-head { display: flex; align-items: center; gap: 8px; min-height: 18px; }
+:where(.town-root) .upgrade-head .g-sub { display: inline-flex; align-items: center; gap: 4px; }
+:where(.town-root) .upgrade-cost { display: flex; flex-wrap: wrap; gap: 2px 10px; font-size: 12px; font-weight: 650; font-variant-numeric: tabular-nums; }
+:where(.town-root) .upgrade-cost span { display: inline-flex; align-items: center; gap: 4px; }
+:where(.town-root) .preview-from { color: var(--g-muted); }
+:where(.town-root) .preview-up { color: var(--g-green); }
+:where(.town-root) .preview-more { color: var(--g-warn); }
+:where(.town-root) .preview-label { font-style: normal; font-weight: 500; color: var(--g-muted); }
+
+/* ── Build strip ────────────────────────────────────────────────────────── */
+:where(.town-root) .strip {
+    position: absolute;
+    left: 50%;
+    bottom: 112px;
+    transform: translateX(-50%);
+    z-index: 6;
+    width: min(1040px, calc(100% - 28px));
+}
+:where(.town-root) .strip-tabs { display: flex; align-items: center; gap: 4px; padding: 9px 10px 0; overflow-x: auto; scrollbar-width: none; }
+:where(.town-root) .strip-tabs::-webkit-scrollbar { display: none; }
+:where(.town-root) .strip-tab {
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    white-space: nowrap;
+    padding: 5px 11px;
+    border-radius: var(--g-radius-xs);
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--g-muted);
+    background: transparent;
+    border: 1px solid transparent;
+    cursor: pointer;
+}
+:where(.town-root) .strip-tab:hover { color: var(--g-text); }
+:where(.town-root) .strip-tab.is-active { background: var(--g-fill-2); border-color: var(--g-line); color: var(--g-text); }
+:where(.town-root) .strip-tab.is-locked { opacity: 0.6; }
+:where(.town-root) .strip-lock { display: flex; align-items: center; gap: 6px; padding: 7px 12px 0; font-size: 11.5px; color: var(--g-warn); }
+:where(.town-root) .strip-cards { display: flex; align-items: stretch; gap: 9px; padding: 10px; overflow-x: auto; overflow-y: visible; scrollbar-width: thin; }
+
+:where(.town-root) .bcard {
+    position: relative;
+    flex: 0 0 148px;
+    min-height: 176px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 5px;
+    padding: 12px 10px 10px;
+    border-radius: var(--g-radius-sm);
+    background: var(--g-fill);
+    border: 1px solid var(--g-line);
+    color: var(--g-text);
+    cursor: pointer;
+    overflow: hidden;
+    text-align: center;
+    transition: transform 0.1s ease, background 0.15s ease, border-color 0.15s ease;
+}
+/* One 3px bar in the building's own colour instead of a glow. */
+:where(.town-root) .bcard::before { content: ''; position: absolute; inset: 0 0 auto; height: 3px; background: var(--accent); }
+:where(.town-root) .bcard:hover:not(:disabled) { transform: translateY(-2px); background: var(--g-fill-2); }
+:where(.town-root) .bcard.is-active { border-color: var(--g-accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--g-accent) 30%, transparent); }
+:where(.town-root) .bcard.is-dim { opacity: 0.55; }
+:where(.town-root) .bcard:disabled { cursor: not-allowed; filter: grayscale(1); }
+:where(.town-root) .bcard-key { position: absolute; left: 6px; top: 6px; padding: 0 4px; font-size: 9px; opacity: 0.7; }
+:where(.town-root) .bcard-count { position: absolute; right: 8px; top: 8px; font-size: 10px; font-weight: 600; color: var(--g-muted); font-variant-numeric: tabular-nums; }
+:where(.town-root) .bcard-art { display: inline-flex; align-items: center; justify-content: center; height: 52px; font-size: 28px; line-height: 1; color: var(--g-text-2); }
+:where(.town-root) .bcard-name { font-size: 13px; font-weight: 600; }
+:where(.town-root) .bcard-cost { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; font-weight: 650; color: var(--g-gold); font-variant-numeric: tabular-nums; }
+:where(.town-root) .bcard-res { display: flex; gap: 7px; font-size: 11px; font-weight: 600; color: var(--g-text-2); font-variant-numeric: tabular-nums; }
+:where(.town-root) .bcard-res span, :where(.town-root) .bcard-io span { display: inline-flex; align-items: center; gap: 3px; }
+:where(.town-root) .bcard-meta { display: flex; flex-wrap: wrap; justify-content: center; gap: 3px 7px; font-size: 10px; color: var(--g-muted); font-variant-numeric: tabular-nums; }
+:where(.town-root) .bcard-meta span { display: inline-flex; align-items: center; gap: 3px; }
+:where(.town-root) .bcard-meta .is-credit { color: var(--g-green); font-weight: 700; }
+:where(.town-root) .bcard-io { display: flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 600; color: var(--g-text-2); font-variant-numeric: tabular-nums; }
+:where(.town-root) .bcard-io .is-out { color: var(--g-green); }
+
+/* ── Terrain legend ─────────────────────────────────────────────────────── */
+:where(.town-root) .legend { position: absolute; left: 14px; bottom: 16px; z-index: 6; width: 220px; display: flex; flex-direction: column; gap: 2px; padding: 10px; }
+:where(.town-root) .legend-head { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+:where(.town-root) .legend-row { display: grid; grid-template-columns: 10px 1fr auto; gap: 8px; align-items: center; padding: 4px 6px; border-radius: var(--g-radius-xs); border: 1px solid transparent; }
+:where(.town-root) .legend-row i { width: 10px; height: 10px; border-radius: 3px; box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.25); }
+:where(.town-root) .legend-row b { font-size: 12px; font-weight: 600; }
+:where(.town-root) .legend-row span { font-size: 10.5px; text-align: right; color: var(--g-muted); }
+:where(.town-root) .legend-row.is-boosting { background: var(--g-fill-2); border-color: var(--g-line-2); }
+
+/* ── Dock ───────────────────────────────────────────────────────────────── */
+/* ── Redesign tray ──────────────────────────────────────────────────────── */
+:where(.town-root) .tray {
+    position: absolute;
+    left: 50%;
+    bottom: 16px;
+    transform: translateX(-50%);
+    z-index: 25;
+    width: min(1040px, calc(100% - 28px));
+    display: flex;
+    flex-direction: column;
+    border-radius: 18px;
+}
+:where(.town-root) .tray-head { display: flex; align-items: center; gap: 8px; padding: 10px 12px 8px; border-bottom: 1px solid var(--g-line); }
+:where(.town-root) .tray-progress { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; font-weight: 600; color: var(--g-muted); font-variant-numeric: tabular-nums; }
+:where(.town-root) .tray-progress.is-done { color: var(--g-green); }
+:where(.town-root) .tray-items { display: flex; align-items: stretch; gap: 6px; padding: 10px 12px 12px; overflow-x: auto; scrollbar-width: thin; }
+:where(.town-root) .tray-item {
+    position: relative;
+    flex: 0 0 auto;
+    display: flex; flex-direction: column; align-items: center; gap: 3px;
+    min-width: 84px;
+    padding: 10px 10px 8px;
+    border-radius: var(--g-radius-sm);
+    background: var(--g-fill);
+    border: 1px solid var(--g-line);
+    color: var(--g-text);
+    font-size: 11.5px; font-weight: 600;
+    cursor: pointer;
+}
+:where(.town-root) .tray-item:hover { background: var(--g-fill-2); }
+:where(.town-root) .tray-item.is-active { border-color: var(--g-accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--g-accent) 30%, transparent); }
+/* Out of storage, and marked for it: dashed, so neither reads as part of the town being laid out. */
+:where(.town-root) .tray-item { position: relative; }
+:where(.town-root) .tray-item.is-stored { border-style: dashed; }
+:where(.town-root) .tray-item.is-marked { border-style: dashed; opacity: 0.7; }
+:where(.town-root) .tray-item.is-stored .tray-sub, :where(.town-root) .tray-item.is-marked .tray-sub { color: var(--g-muted); }
+:where(.town-root) .tray-store {
+    position: absolute;
+    right: 3px;
+    top: 3px;
+    display: inline-flex;
+    padding: 2px;
+    border-radius: var(--g-radius-xs);
+    color: var(--g-muted);
+    font-size: 12px;
+}
+:where(.town-root) .tray-store:hover { color: var(--g-text); background: var(--g-fill-2); }
+:where(.town-root) .bcard.is-stored { --accent: var(--g-muted); }
+:where(.town-root) .bcard.is-stored .bcard-cost { color: var(--g-text-2); }
+:where(.town-root) .strip-tab-count {
+    min-width: 16px;
+    padding: 0 4px;
+    border-radius: 999px;
+    background: var(--g-fill-2);
+    color: var(--g-text-2);
+    font-size: 10px;
+    font-weight: 800;
+    line-height: 16px;
+    text-align: center;
+}
+:where(.town-root) .draft-btn { position: relative; }
+/* A redesign is waiting as a draft. */
+:where(.town-root) .draft-dot {
+    position: absolute;
+    right: 3px;
+    top: 3px;
+    width: 8px;
+    height: 8px;
+    border-radius: 999px;
+    background: var(--g-accent);
+    box-shadow: 0 0 0 2px var(--g-bg);
+}
+:where(.town-root) .tray-art { display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 36px; font-size: 24px; }
+:where(.town-root) .tray-art .iconify { width: 22px; height: 22px; color: var(--g-muted); }
+:where(.town-root) .tray-sub { display: inline-flex; align-items: center; gap: 3px; font-size: 10.5px; font-weight: 500; color: var(--g-muted); font-variant-numeric: tabular-nums; }
+:where(.town-root) .tray-count { position: absolute; right: 6px; top: 6px; padding: 1px 6px; border-radius: 999px; background: var(--g-fill-2); font-size: 10px; font-weight: 700; color: var(--g-text-2); font-variant-numeric: tabular-nums; }
+:where(.town-root) .tray-empty { align-self: center; padding: 6px 4px; font-size: 12px; color: var(--g-muted); }
+:where(.town-root) .card-note.is-warn { color: var(--g-warn); font-size: 12.5px; }
+
+:where(.town-root) .dock {
+    position: absolute;
+    left: 50%;
+    bottom: 16px;
+    transform: translateX(-50%);
+    z-index: 25;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 6px;
+    border-radius: 18px;
+}
+:where(.town-root) .dock-btn {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 3px;
+    width: 72px;
+    padding: 8px 4px 6px;
+    border-radius: var(--g-radius-sm);
+    background: transparent;
+    border: 1px solid transparent;
+    color: var(--g-text-2);
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.15s ease, color 0.15s ease;
+}
+:where(.town-root) .dock-btn > span { font-size: 11px; }
+:where(.town-root) .dock-btn:hover { background: var(--g-fill); color: var(--g-text); }
+:where(.town-root) .dock-btn.is-active { background: var(--g-fill-2); border-color: var(--g-line); color: var(--g-text); }
+:where(.town-root) .dock-btn.is-active .dock-ico { color: var(--g-accent); }
+:where(.town-root) .dock-ico { width: 20px; height: 20px; margin-top: 4px; color: var(--g-muted); }
+:where(.town-root) .dock-btn:hover .dock-ico { color: var(--g-text); }
+:where(.town-root) .dock-btn kbd { position: absolute; right: 4px; top: 4px; padding: 1px; font-size: 9px; border: 0; background: transparent; }
+:where(.town-root) .dock-dot { position: absolute; left: 8px; top: 8px; width: 6px; height: 6px; border-radius: 50%; background: var(--g-green); }
+:where(.town-root) .dock-badge {
+    position: absolute;
+    left: 50%;
+    top: 2px;
+    transform: translateX(4px);
+    min-width: 17px;
+    height: 17px;
+    padding: 0 5px;
+    border-radius: 999px;
+    background: var(--g-accent);
+    color: var(--g-accent-fg);
+    font-size: 10px;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+/* ── Land window ────────────────────────────────────────────────────────── */
+:where(.town-root) .plotrow { border: 1px solid var(--g-line); background: var(--g-bg-2); }
+:where(.town-root) .plotrow:hover { background: var(--g-bg-2); border-color: var(--g-line-2); }
+:where(.town-root) .plotrow + .plotrow { margin-top: 5px; }
+:where(.town-root) .plot-ico { width: 16px; height: 16px; flex-shrink: 0; color: var(--g-muted); }
+:where(.town-root) .plotrow-sub { font-size: 11px; color: var(--g-muted); }
+:where(.town-root) .plotrow-sub.is-gold { color: var(--g-gold); }
+:where(.town-root) .plotrow-price { display: inline-flex; align-items: center; gap: 4px; color: var(--g-gold); font-variant-numeric: tabular-nums; }
+
+/* ── Modals ─────────────────────────────────────────────────────────────── */
+/* The dock sits along the bottom edge, so leave it room: a window that
+   reaches under it hides its own footer. */
+:where(.town-root) .backdrop {
+    position: absolute;
+    inset: 0;
+    z-index: 20;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px 24px 116px;
+    background: rgba(40, 32, 16, 0.32);
+    backdrop-filter: blur(3px);
+}
+.dark :where(.town-root) .backdrop { background: rgba(4, 6, 10, 0.5); }
+
+:where(.town-root) .welcome { overflow: hidden; }
+:where(.town-root) .welcome-hero {
+    position: relative;
+    flex-shrink: 0;
+    overflow: hidden;
+    padding: 26px 20px 18px;
+    text-align: center;
+    background:
+        radial-gradient(120% 90% at 50% 0%, var(--g-gold-bg), transparent 70%),
+        linear-gradient(180deg, color-mix(in srgb, var(--g-gold) 10%, transparent), transparent);
+    border-bottom: 1px solid color-mix(in srgb, var(--g-gold) 25%, transparent);
+}
+:where(.town-root) .welcome-close { position: absolute; right: 10px; top: 10px; z-index: 1; }
+:where(.town-root) .welcome-sun {
+    position: absolute;
+    left: 50%;
+    top: -120px;
+    width: 260px;
+    height: 260px;
+    margin-left: -130px;
+    border-radius: 50%;
+    background: repeating-conic-gradient(from 0deg, color-mix(in srgb, var(--g-gold) 16%, transparent) 0 10deg, transparent 10deg 20deg);
+    mask-image: radial-gradient(circle, #000 30%, transparent 70%);
+    animation: welcome-spin 30s linear infinite;
+    pointer-events: none;
+}
+:where(.town-root) .welcome-kicker { position: relative; display: inline-flex; align-items: center; gap: 5px; padding: 2px 10px; border-radius: 999px; background: var(--g-fill); font-size: 11.5px; color: var(--g-text-2); }
+:where(.town-root) .welcome-title { position: relative; margin-top: 8px; font-size: 20px; font-weight: 700; letter-spacing: -0.01em; }
+:where(.town-root) .welcome-total { position: relative; display: inline-flex; align-items: center; gap: 6px; margin-top: 6px; font-size: 28px; color: var(--g-gold); font-variant-numeric: tabular-nums; }
+:where(.town-root) .welcome-total b { font-weight: 800; }
+:where(.town-root) .welcome-total-sub { position: relative; font-size: 11.5px; color: var(--g-muted); }
+:where(.town-root) .welcome-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+:where(.town-root) .welcome-cell { animation: welcome-pop 0.35s cubic-bezier(0.2, 1.4, 0.4, 1) both; }
+:where(.town-root) .welcome-art { font-size: 22px; line-height: 1; }
+:where(.town-root) .welcome-used { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; font-size: 12px; color: var(--g-muted); }
+:where(.town-root) .welcome-used-item { display: inline-flex; align-items: center; gap: 3px; font-variant-numeric: tabular-nums; }
+@keyframes welcome-spin { to { transform: rotate(360deg); } }
+@keyframes welcome-pop { from { opacity: 0; transform: translateY(6px) scale(0.92); } }
+:where(.town-root) .welcome.is-calm :is(.welcome-sun, .welcome-cell) { animation: none; }
+@media (prefers-reduced-motion: reduce) {
+    :where(.town-root) .welcome-sun, :where(.town-root) .welcome-cell { animation: none; }
+}
+:where(.town-root) .blocked-art { font-size: 16px; line-height: 1; }
+
+/* ── Help ───────────────────────────────────────────────────────────────── */
+:where(.town-root) .help dl { display: grid; grid-template-columns: 112px 1fr; gap: 6px 12px; align-items: baseline; }
+:where(.town-root) .help dt { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 650; color: var(--g-text); }
+:where(.town-root) .help dt > .iconify { color: var(--g-muted); flex-shrink: 0; }
+:where(.town-root) .help dd { font-size: 12.5px; line-height: 1.5; color: var(--g-text-2); }
+:where(.town-root) .help-keys { font-size: 12px; line-height: 1.9; color: var(--g-text-2); }
+:where(.town-root) .help-keys kbd { margin-right: 2px; }
+@media (max-width: 520px) {
+    :where(.town-root) .help dl { grid-template-columns: 1fr; gap: 2px; }
+    :where(.town-root) .help dd { margin-bottom: 8px; }
+    /* Six dock buttons fit a phone only without the key hints. */
+    :where(.town-root) .dock-btn { width: 54px; }
+    :where(.town-root) .dock-btn kbd { display: none; }
+}
+</style>

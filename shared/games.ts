@@ -1,11 +1,17 @@
-import { DEAD_FRONT_ICON, PIRATE_RAID_ICON, SHAPEZZ_ICON, VOID_RUNNER_ICON } from './icons'
+import { DEAD_FRONT_ICON, PIRATE_RAID_ICON, POLYTOWN_ICON, SHAPEZZ_ICON, VOID_RUNNER_ICON } from './icons'
 
 /**
  * The arcade's games: the lobby lists them and the hub manifest declares them.
- * Only games with `ready: true` are listed and declared. Each declares one
- * star level, a milestone about halfway through the game (shared/stars.ts
- * decides it); nothing here earns or costs coins or gems.
+ * Only games with `ready: true` are listed and declared. Each declares its
+ * star levels (shared/stars.ts decides them): one milestone about halfway
+ * through for the action games, five for Polytown.
  */
+export interface ArcadeStar {
+    key: string
+    name: string
+    description: string
+}
+
 export interface ArcadeGame {
     slug: string
     name: string
@@ -22,8 +28,8 @@ export interface ArcadeGame {
     /** Multiplayer games say so in the lobby. */
     multiplayer: boolean
     ready: boolean
-    /** The game's one star level (key `[a-z0-9-]{1,40}`). */
-    star: { key: string, name: string, description: string }
+    /** The game's star levels, level n first-to-last (key `[a-z0-9-]{1,40}`). */
+    stars: ArcadeStar[]
 }
 
 const ALL_GAMES: ArcadeGame[] = [
@@ -38,7 +44,7 @@ const ALL_GAMES: ArcadeGame[] = [
         accent: '#b4532a',
         multiplayer: true,
         ready: true,
-        star: { key: 'researcher', name: 'Researcher', description: 'Fully research three perks' }
+        stars: [{ key: 'researcher', name: 'Researcher', description: 'Fully research three perks' }]
     },
     {
         slug: 'shapezz',
@@ -51,7 +57,7 @@ const ALL_GAMES: ArcadeGame[] = [
         accent: '#e04fd0',
         multiplayer: false,
         ready: true,
-        star: { key: 'past-the-wall', name: 'Past the Wall', description: 'Reach checkpoint 10 in one run' }
+        stars: [{ key: 'past-the-wall', name: 'Past the Wall', description: 'Reach checkpoint 10 in one run' }]
     },
     {
         slug: 'pirate-raid',
@@ -64,7 +70,7 @@ const ALL_GAMES: ArcadeGame[] = [
         accent: '#1f8fbf',
         multiplayer: false,
         ready: true,
-        star: { key: 'rough-waters', name: 'Rough Waters', description: 'Survive a full raid at difficulty 500 or higher' }
+        stars: [{ key: 'rough-waters', name: 'Rough Waters', description: 'Survive a full raid at difficulty 500 or higher' }]
     },
     {
         slug: 'void-runner',
@@ -77,7 +83,26 @@ const ALL_GAMES: ArcadeGame[] = [
         accent: '#6a5cff',
         multiplayer: false,
         ready: true,
-        star: { key: 'cinder-reach', name: 'Cinder Reach', description: 'Clear sector 2: kill its warden and fly home' }
+        stars: [{ key: 'cinder-reach', name: 'Cinder Reach', description: 'Clear sector 2: kill its warden and fly home' }]
+    },
+    {
+        slug: 'polytown',
+        name: 'Polytown',
+        tagline: 'Grow a town, trade its goods, raise its wonders',
+        description: 'Build homes, workshops and roads on your own plots, sell what your town makes or trade it with other mayors, and raise five monuments stage by stage.',
+        path: '/polytown',
+        icon: POLYTOWN_ICON,
+        cover: '/images/games/polytown.jpg',
+        accent: '#2a9d8f',
+        multiplayer: true,
+        ready: true,
+        stars: [
+            { key: 'cornerstones', name: 'Cornerstones', description: 'Finish 8 monument stages' },
+            { key: 'master-mason', name: 'Master Mason', description: 'Finish 16 monument stages' },
+            { key: 'wonder-builder', name: 'Wonder Builder', description: 'Finish 24 monument stages' },
+            { key: 'skyline', name: 'Skyline', description: 'Finish 32 monument stages' },
+            { key: 'wonders-of-the-world', name: 'Wonders of the World', description: 'Finish every stage of all five monuments' }
+        ]
     }
 ]
 

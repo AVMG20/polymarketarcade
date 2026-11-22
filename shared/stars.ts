@@ -1,9 +1,10 @@
 import { DF_PERK_MAX_LEVEL } from './dead-front/progression'
 
 /**
- * Each arcade game's one star: a milestone about halfway through it. Progress
- * in these games never goes back, so neither does the star. Pure rules over
- * the saved state; server/utils/stars.ts reads the state and tells the hub.
+ * Each arcade game's star levels: one milestone about halfway through for the
+ * action games, five for Polytown. Progress in these games never goes back,
+ * so neither do the stars. Pure rules over the saved state;
+ * server/utils/stars.ts reads the state and tells the hub.
  */
 
 export const DF_STAR_PERKS = 3
@@ -25,4 +26,12 @@ export function pirateStars(highestCompletedDifficulty: number): number {
 
 export function voidStars(highestSectorCleared: number): number {
     return highestSectorCleared >= VOID_STAR_SECTOR ? 1 : 0
+}
+
+/** Polytown: a level per this many monument stages built, across all five monuments. */
+export const POLYTOWN_STAGES_PER_STAR = 8
+export const POLYTOWN_MAX_STARS = 5
+
+export function polytownStars(monumentStages: number): number {
+    return Math.max(0, Math.min(POLYTOWN_MAX_STARS, Math.floor(monumentStages / POLYTOWN_STAGES_PER_STAR)))
 }

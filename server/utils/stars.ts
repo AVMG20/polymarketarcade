@@ -1,8 +1,9 @@
-import { and, eq } from 'drizzle-orm'
+import { and, eq, inArray } from 'drizzle-orm'
 import { db } from '#server/database/index'
-import { deadFrontProfiles, pirateState, shapezzState, starReports, voidState } from '#server/database/schema'
+import { deadFrontProfiles, pirateState, polytownBuildings, polytownState, polytownStorage, shapezzState, starReports, voidState } from '#server/database/schema'
 import { ARCADE_GAMES } from '#shared/games'
-import { deadFrontStars, pirateStars, shapezzStars, voidStars } from '#shared/stars'
+import { TOWN_MONUMENT_IDS } from '#shared/polytown/town-monuments'
+import { deadFrontStars, pirateStars, polytownStars, shapezzStars, voidStars } from '#shared/stars'
 import { arcadeEnv } from './env'
 import { hub, HubError } from './hub'
 
@@ -13,7 +14,7 @@ import { hub, HubError } from './hub'
  * a player who never connected there) is sent again on the next sync.
  */
 
-type Slug = 'dead-front' | 'shapezz' | 'pirate-raid' | 'void-runner'
+type Slug = 'dead-front' | 'shapezz' | 'pirate-raid' | 'void-runner' | 'polytown'
 
 const LEVEL: Record<Slug, (playerId: string) => number> = {
     'dead-front': (id) => {
@@ -31,6 +32,22 @@ const LEVEL: Record<Slug, (playerId: string) => number> = {
     'void-runner': (id) => {
         const row = db.select({ best: voidState.highestSectorCleared }).from(voidState).where(eq(voidState.playerId, id)).get()
         return row ? voidStars(row.best) : 0
+    },
+    // Monument stages built, on the map or in storage. A stage whose timer ran
+    // out counts at once, settled or not, so the level never waits on a visit.
+    'polytown': (id) => {
+        const now = Date.now()
+        const monuments = [...TOWN_MONUMENT_IDS]
+        let stages = 0
+        for (const b of db.select({ level: polytownBuildings.level, upgradingTo: polytownBuildings.upgradingTo, completesAt: polytownBuildings.completesAt })
+            .from(polytownBuildings).where(and(eq(polytownBuildings.playerId, id), inArray(polytownBuildings.type, monuments))).all()) {
+            stages += b.completesAt.getTime() <= now ? (b.upgradingTo ?? Math.max(b.level, 1)) : b.level
+        }
+        for (const s of db.select({ level: polytownStorage.level }).from(polytownStorage)
+            .where(and(eq(polytownStorage.playerId, id), inArray(polytownStorage.type, monuments))).all()) {
+            stages += s.level
+        }
+        return polytownStars(stages)
     }
 }
 
@@ -77,7 +94,7 @@ export async function syncStar(playerId: string, game: Slug): Promise<{ game: st
 /** Send every pending level for every player (boot and hourly): the backfill. */
 export async function syncAllStars(): Promise<number> {
     const ids = new Set<string>()
-    for (const table of [deadFrontProfiles, shapezzState, pirateState, voidState]) {
+    for (const table of [deadFrontProfiles, shapezzState, pirateState, voidState, polytownState]) {
         for (const row of db.select({ id: table.playerId }).from(table).all()) ids.add(row.id)
     }
     let sent = 0

@@ -34,11 +34,11 @@ describe('config check', () => {
 })
 
 describe('manifest', () => {
-    it('declares only finished games, one star level each and absolute cover URLs', () => {
+    it('declares only finished games, their star levels and absolute cover URLs', () => {
         const { games } = arcadeManifest()
         for (const game of games) {
             expect(game.slug).toMatch(/^[a-z0-9-]{2,40}$/)
-            expect(game.stars).toHaveLength(1)
+            expect(game.stars).toHaveLength(game.slug === 'polytown' ? 5 : 1)
             expect(game.playPath).toMatch(/^\/[^#\s\\]*$/)
             expect(game.cover).toMatch(/^http:\/\/arcade\.test\//)
             expect(game.accent).toMatch(/^#[0-9a-f]{6}$/i)

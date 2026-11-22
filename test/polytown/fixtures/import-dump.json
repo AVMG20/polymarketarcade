@@ -1,0 +1,87 @@
+{
+    "user_ids": ["old-ann", "old-bob"],
+    "user": [
+        { "id": "old-ann", "name": "Ann O'Reilly", "balance": "123456.7800", "gems": 900 },
+        { "id": "old-bob", "name": "Bob", "balance": "5.0000", "gems": 3 },
+        { "id": "old-cat", "name": "Cat (not imported)", "balance": "1.0000", "gems": 1 }
+    ],
+    "town_realm": [{ "id": 1, "founding_cursor": 12 }],
+    "town_state": [
+        {
+            "id": "state-ann", "user_id": "old-ann", "happiness": 81, "tick_progress_ms": 12000,
+            "last_settled_at": "2026-11-20T10:00:00.123456", "plots_bought": 2, "last_plot_bought_at": "2026-11-01T08:00:00",
+            "milestones_claimed": ["first-home", "first-farm"], "coins_earned": "150000.5000", "produced": { "wheat": 9000 },
+            "builders": 4, "carry": { "b-farm": { "wheat": 0.25 } }, "monument_credit": { "pyramid": 2 },
+            "build_boost_until": null, "production_boost_until": "2026-11-19T10:00:00", "temp_builder_until": null,
+            "market_boost_until": null, "market_boost_bonus_left": "0.0000", "created_at": "2026-10-01T00:00:00"
+        },
+        {
+            "id": "state-bob", "user_id": "old-bob", "happiness": 50, "tick_progress_ms": 0,
+            "last_settled_at": "2026-11-20T11:00:00", "plots_bought": 1, "last_plot_bought_at": "2026-11-10T00:00:00",
+            "milestones_claimed": [], "coins_earned": "0.0000", "produced": {}, "builders": 3, "carry": {}, "monument_credit": {},
+            "build_boost_until": null, "production_boost_until": null, "temp_builder_until": null, "market_boost_until": null,
+            "market_boost_bonus_left": "0.0000", "created_at": "2026-11-10T00:00:00"
+        },
+        {
+            "id": "state-cat", "user_id": "old-cat", "happiness": 50, "tick_progress_ms": 0, "last_settled_at": "2026-11-20T11:00:00",
+            "plots_bought": 1, "last_plot_bought_at": "2026-11-10T00:00:00", "milestones_claimed": [], "coins_earned": "0.0000",
+            "produced": {}, "builders": 3, "carry": {}, "monument_credit": {}, "market_boost_bonus_left": "0.0000", "created_at": "2026-11-10T00:00:00"
+        }
+    ],
+    "town_plots": [
+        { "id": "plot-ann-1", "user_id": "old-ann", "x": 900, "y": 900, "list_price": null, "paid_price": "0.0000", "created_at": "2026-10-01T00:00:00" },
+        { "id": "plot-ann-2", "user_id": "old-ann", "x": 901, "y": 900, "list_price": "75000.5000", "paid_price": "225000.0000", "created_at": "2026-11-01T08:00:00" },
+        { "id": "plot-bob-1", "user_id": "old-bob", "x": 950, "y": 950, "list_price": null, "paid_price": "0.0000", "created_at": "2026-11-10T00:00:00" },
+        { "id": "plot-cat-1", "user_id": "old-cat", "x": 990, "y": 990, "list_price": null, "paid_price": "0.0000", "created_at": "2026-11-10T00:00:00" }
+    ],
+    "town_buildings": [
+        { "id": "b-farm", "user_id": "old-ann", "plot_id": "plot-ann-1", "type": "farm", "tile_x": 1, "tile_y": 1, "rotation": 2, "level": 3, "upgrading_to": null, "completes_at": "2026-11-01T00:00:00", "created_at": "2026-10-01T00:00:00" },
+        { "id": "b-house", "user_id": "old-ann", "plot_id": "plot-ann-1", "type": "house", "tile_x": 0, "tile_y": 1, "rotation": 2, "level": 2, "upgrading_to": 3, "completes_at": "2026-11-21T00:00:00", "created_at": "2026-10-01T00:00:00" },
+        { "id": "b-road", "user_id": "old-ann", "plot_id": "plot-ann-1", "type": "road", "tile_x": 0, "tile_y": 0, "rotation": 0, "level": 1, "upgrading_to": null, "completes_at": "2026-10-01T00:00:00", "created_at": "2026-10-01T00:00:00" },
+        { "id": "b-taken", "user_id": "old-bob", "plot_id": "plot-bob-1", "type": "farm", "tile_x": 2, "tile_y": 2, "rotation": 0, "level": 1, "upgrading_to": null, "completes_at": "2026-11-10T00:00:00", "created_at": "2026-11-10T00:00:00" },
+        { "id": "b-cat", "user_id": "old-cat", "plot_id": "plot-cat-1", "type": "farm", "tile_x": 0, "tile_y": 0, "rotation": 0, "level": 1, "upgrading_to": null, "completes_at": "2026-11-10T00:00:00", "created_at": "2026-11-10T00:00:00" }
+    ],
+    "town_storage": [
+        { "id": "s-mill", "user_id": "old-ann", "type": "mill", "level": 2, "upgrading_to": 3, "remaining_ms": 600000, "created_at": "2026-10-02T00:00:00", "stored_at": "2026-11-15T00:00:00" }
+    ],
+    "town_redesign_drafts": [
+        { "user_id": "old-ann", "draft": { "spots": [], "roads": [], "store": ["b-road"] }, "updated_at": "2026-11-18T00:00:00" }
+    ],
+    "town_inventory": [
+        { "id": "i1", "user_id": "old-ann", "resource": "wheat", "amount": 500 },
+        { "id": "i2", "user_id": "old-ann", "resource": "wood", "amount": 20 },
+        { "id": "i3", "user_id": "old-cat", "resource": "wheat", "amount": 7 }
+    ],
+    "town_orders": [
+        { "id": "o-sell", "user_id": "old-ann", "resource": "wheat", "side": "sell", "price": "40.0000", "quantity": 100, "filled": 30, "status": "open", "created_at": "2026-11-19T00:00:00", "updated_at": "2026-11-19T00:00:00" },
+        { "id": "o-sell-planks", "user_id": "old-bob", "resource": "planks", "side": "sell", "price": "200.0000", "quantity": 12, "filled": 0, "status": "open", "created_at": "2026-11-19T00:00:00", "updated_at": "2026-11-19T00:00:00" },
+        { "id": "o-buy", "user_id": "old-bob", "resource": "wood", "side": "buy", "price": "35.0000", "quantity": 50, "filled": 0, "status": "open", "created_at": "2026-11-19T00:00:00", "updated_at": "2026-11-19T00:00:00" },
+        { "id": "o-done", "user_id": "old-ann", "resource": "wood", "side": "sell", "price": "35.0000", "quantity": 5, "filled": 5, "status": "filled", "created_at": "2026-11-18T00:00:00", "updated_at": "2026-11-18T00:00:00" }
+    ],
+    "town_trades": [
+        { "id": "t-cat", "resource": "wheat", "buyer_id": "old-cat", "seller_id": "old-ann", "taker_id": "old-cat", "price": "40.0000", "quantity": 30, "created_at": "2026-11-19T12:00:00" },
+        { "id": "t-ab", "resource": "wood", "buyer_id": "old-bob", "seller_id": "old-ann", "taker_id": "old-ann", "price": "35.0000", "quantity": 5, "created_at": "2026-11-18T12:00:00" }
+    ],
+    "town_production": [
+        { "id": "p1", "user_id": "old-ann", "resource": "wheat", "amount": 120, "from_at": "2026-11-20T08:00:00", "to_at": "2026-11-20T10:00:00" }
+    ],
+    "town_events": [
+        { "id": "e1", "user_id": "old-ann", "kind": "trade", "data": { "kind": "trade", "side": "sell", "resource": "wheat", "quantity": 30, "price": 40, "coins": 1200, "done": false }, "created_at": "2026-11-19T12:00:00" }
+    ],
+    "town_contracts": [
+        { "id": "c1", "user_id": "old-ann", "day": "2026-11-20", "slot": 0, "resource": "wheat", "quantity": 400, "reward": "24000.0000", "delivered": true, "delivered_at": "2026-11-20T09:00:00", "created_at": "2026-11-20T00:00:00" }
+    ],
+    "town_contract_days": [
+        { "id": "cd1", "user_id": "old-ann", "day": "2026-11-20", "bonus_gems": 4, "bonus_claimed": false, "created_at": "2026-11-20T00:00:00" }
+    ],
+    "town_streak": [
+        {
+            "user_id": "old-ann", "step": 5, "last_day": "2026-11-20", "claimed": 7, "cycle": 1, "lucky": 1, "updated_at": "2026-11-20T00:00:00",
+            "locked": {
+                "4": { "scale": { "incomePerDay": 60000, "outputPerHour": {} }, "reward": { "coins": 0, "gems": 2, "resources": {} } },
+                "5": { "scale": { "incomePerDay": 60000, "outputPerHour": {} }, "reward": { "coins": 0, "gems": 0, "resources": { "wheat": 90 } } },
+                "9": { "scale": { "incomePerDay": 60000, "outputPerHour": {} }, "reward": { "coins": 0, "gems": 0, "resources": {}, "boosts": { "build": 3600000 } } }
+            }
+        }
+    ]
+}
