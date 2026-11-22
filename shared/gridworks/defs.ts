@@ -2,10 +2,10 @@
 // numbers that tie them together. Everything else in the game reads from here.
 
 export const CHUNK = 8
-/** The plot is MAP_CHUNKS × MAP_CHUNKS chunks (96 × 96 tiles). */
-export const MAP_CHUNKS = 12
+/** The plot is MAP_CHUNKS × MAP_CHUNKS chunks (192 × 192 tiles). */
+export const MAP_CHUNKS = 24
 export const MAP_TILES = CHUNK * MAP_CHUNKS
-export const START_CHUNKS = ['5,5', '6,5', '5,6', '6,6']
+export const START_CHUNKS = ['11,11', '12,11', '11,12', '12,12']
 
 export const ITEM_IDS = [
     'iron-ore', 'copper-ore', 'stone', 'coal', 'oil', 'crystal',
@@ -180,18 +180,18 @@ export const RESEARCH: ResearchNode[] = [
     { id: 'skyway', tier: 3, branch: 'logistics', name: 'Skyway', cost: { steel: 160000 }, desc: 'Belts on layer 2' },
     { id: 'belt-mk3', tier: 3, branch: 'logistics', name: 'Belt Mk3', cost: { steel: 80000 }, desc: '240 items/min' },
     { id: 'auto-queue', tier: 3, branch: 'idle', name: 'Auto-queue', cost: { circuit: 15000 }, desc: 'Research queue keeps going offline' },
-    { id: 'silo', tier: 3, branch: 'idle', name: 'Silo', cost: { brick: 330000, steel: 160000 }, desc: '3×3 storage, 6k of each item' },
+    { id: 'silo', tier: 3, branch: 'idle', name: 'Silo', cost: { brick: 240000, steel: 140000 }, desc: '3×3 storage, 6k of each item' },
 
     { id: 'oil', tier: 4, branch: 'production', name: 'Oil', cost: { steel: 330000, circuit: 270000 }, desc: 'Pumpjack, refinery, plastic' },
     { id: 'electronics', tier: 4, branch: 'production', name: 'Electronics', cost: { plastic: 330000 }, desc: 'Chips' },
     { id: 'machine-mk4', tier: 4, branch: 'production', name: 'Machine Mk4', cost: { motor: 240000 }, desc: 'Machines ×3' },
     { id: 'belt-mk4', tier: 4, branch: 'logistics', name: 'Belt Mk4', cost: { motor: 200000 }, desc: '480 items/min' },
-    { id: 'storage-5', tier: 4, branch: 'idle', name: 'Storage V', cost: { steel: 800000 }, desc: 'Storage holds 15k of each item' },
+    { id: 'storage-5', tier: 4, branch: 'idle', name: 'Storage V', cost: { steel: 480000 }, desc: 'Storage holds 15k of each item' },
 
     { id: 'crystal', tier: 5, branch: 'production', name: 'Crystal', cost: { chip: 330000, motor: 200000 }, desc: 'Crystal drill, grinder, lenses' },
     { id: 'fusion-reactor', tier: 5, branch: 'production', name: 'Fusion reactor', cost: { lens: 60000, chip: 400000 }, desc: '1×3: Fusion Cores' },
     { id: 'machine-mk5', tier: 5, branch: 'production', name: 'Machine Mk5', cost: { lens: 100000 }, desc: 'Machines ×4' },
-    { id: 'storage-6', tier: 5, branch: 'idle', name: 'Storage VI', cost: { motor: 400000 }, desc: 'Storage holds 40k of each item' }
+    { id: 'storage-6', tier: 5, branch: 'idle', name: 'Storage VI', cost: { motor: 260000 }, desc: 'Storage holds 40k of each item' }
 ]
 /**
  * No prototype: ids arrive from the client, and a plain object would answer
@@ -241,8 +241,8 @@ export function storageLevel(done: readonly string[]): number {
 
 /** Price of the n-th chunk bought (0-based, the free start chunks excluded). */
 export function chunkCost(bought: number): Stock {
-    const brick = Math.round(60 * Math.pow(1.35, bought))
-    const steel = bought < 2 ? 0 : Math.round(25 * Math.pow(1.4, bought - 2))
+    const brick = Math.round(40 + 35 * bought + 11 * bought * bought)
+    const steel = bought < 3 ? 0 : Math.round(20 * (bought - 2) + 6 * (bought - 2) * (bought - 2))
     return steel ? { brick, steel } : { brick }
 }
 

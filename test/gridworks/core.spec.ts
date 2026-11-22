@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { RESEARCH, RESEARCH_BY_ID, STORAGE_CAP, STORAGE_CAP_RESEARCH, researchAvailable, storageLevel, tierOpen, type OreId, MAP_TILES } from '#shared/gridworks/defs'
+import { MAP_CHUNKS, MAP_TILES, RESEARCH, RESEARCH_BY_ID, STORAGE_CAP, STORAGE_CAP_RESEARCH, researchAvailable, storageLevel, tierOpen, type OreId } from '#shared/gridworks/defs'
 import { accepts, buildGraph, localToWorld, outputPorts, type Entity } from '#shared/gridworks/layout'
 import { solve, waterFill } from '#shared/gridworks/flow'
 import { applyOp, newState, parseOp, settle, storageCap, type GridState } from '#shared/gridworks/game'
@@ -31,7 +31,21 @@ function minerLine(x: number, y: number, len: number): Entity[] {
 describe('gridworks world', () => {
     it('is deterministic per seed and has every early ore in the start area', () => {
         expect(oreMap(SEED).tiles).toBe(ore.tiles)
+        expect(MAP_CHUNKS).toBe(24)
+        expect(MAP_TILES).toBe(192)
         for (const kind of ['iron-ore', 'copper-ore', 'stone', 'coal'] as const) expect(() => findOre(kind)).not.toThrow()
+        // Oil and crystal are guaranteed within a few chunks of the start on any seed.
+        let hasOil = false
+        let hasCrystal = false
+        for (let y = 0; y < MAP_TILES; y++) {
+            for (let x = 0; x < MAP_TILES; x++) {
+                const o = oreAt(ore, x, y)
+                if (o === 'oil') hasOil = true
+                if (o === 'crystal') hasCrystal = true
+            }
+        }
+        expect(hasOil).toBe(true)
+        expect(hasCrystal).toBe(true)
     })
 })
 
@@ -77,6 +91,15 @@ describe('gridworks layout', () => {
         const g = buildGraph(ents)
         expect(g.out[0]![0]?.to).toBe(1)
         expect(g.out[1]![0]?.to).toBe(3)
+    })
+
+    it('mergers and splitters only accept items on their own layer', () => {
+        const merger: Entity = { k: 'merger', x: 10, y: 10, r: 0 }
+        const splitter: Entity = { k: 'splitter', x: 10, y: 10, r: 0 }
+        expect(accepts(merger, 10, 10, 0, 0)).toBe('behind')
+        expect(accepts(merger, 10, 10, 1, 0)).toBeNull()
+        expect(accepts(splitter, 10, 10, 0, 0)).toBe('behind')
+        expect(accepts(splitter, 10, 10, 1, 0)).toBeNull()
     })
 })
 
@@ -142,7 +165,8 @@ describe('gridworks settle and ops', () => {
     it('rejects miners off ore, overlaps and locked buildings', () => {
         const s = fresh()
         const [x, y] = findOre('iron-ore')
-        expect(applyOp(s, { op: 'place', e: { k: 'miner', x: 47, y: 47, r: 0 } }, now)).toBe('blocked')
+        const mid = MAP_TILES / 2 - 1
+        expect(applyOp(s, { op: 'place', e: { k: 'miner', x: mid, y: mid, r: 0 } }, now)).toBe('blocked')
         expect(applyOp(s, { op: 'place', e: { k: 'smelter', x, y, r: 0 } }, now)).toBe('locked')
         expect(applyOp(s, { op: 'place', e: { k: 'belt', x: 0, y: 0, r: 0 } }, now)).toBe('land')
     })
@@ -332,17 +356,18 @@ describe('gridworks untrusted input', () => {
     })
 
     it('parseOp rejects chunk keys off the map or not in canonical form', () => {
-        for (const key of ['12,0', '0,12', '05,5', '-1,5', '5', '5,5,5', ' 5,5', '5.0,5', '1e1,5']) {
+        for (const key of [`${MAP_CHUNKS},0`, `0,${MAP_CHUNKS}`, '05,5', '-1,5', '5', '5,5,5', ' 5,5', '5.0,5', '1e1,5']) {
             expect(parseOp({ op: 'chunk', key })).toBeNull()
         }
     })
 
     it('applyOp turns away a hand-built op with a made-up id instead of throwing', () => {
         const s = newState(SEED, now)
+        const mid = MAP_TILES / 2 - 1
         for (const id of INHERITED) {
             expect(applyOp(s, { op: 'research', id }, now)).toBe('research')
-            expect(applyOp(s, { op: 'place', e: { k: id as 'belt', x: 44, y: 44, r: 0 } }, now)).toBe('invalid')
-            expect(applyOp(s, { op: 'recipe', x: 47, y: 47, recipe: id }, now)).toBe('recipe')
+            expect(applyOp(s, { op: 'place', e: { k: id as 'belt', x: mid - 3, y: mid - 3, r: 0 } }, now)).toBe('invalid')
+            expect(applyOp(s, { op: 'recipe', x: mid, y: mid, recipe: id }, now)).toBe('recipe')
             expect(applyOp(s, { op: 'goal', id }, now, null)).toBe('missing')
         }
         expect(s.queue).toEqual([])

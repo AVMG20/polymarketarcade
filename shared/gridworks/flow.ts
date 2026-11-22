@@ -177,10 +177,51 @@ export function solve(entities: readonly Entity[], ore: OreMap, flags: SolveFlag
     let prevStore: Float64Array | null = null
     let prevLab: Float64Array | null = null
 
-    // Per-tick scratch.
+    // Per-tick scratch (pre-allocated flat arrays to avoid GC churn on large factories).
     const room = new Float64Array(n)
-    const offers: { from: number, to: number, amt: Float64Array, sum: number }[] = []
+    const maxOffers = Math.max(16, n * 3)
+    const offerFrom = new Int32Array(maxOffers)
+    const offerTo = new Int32Array(maxOffers)
+    const offerSum = new Float64Array(maxOffers)
+    const offerAmt = new Float64Array(maxOffers * NI)
+    let offerCount = 0
     const incoming: number[][] = nodes.map(() => [])
+    const wfWant = new Float64Array(16)
+    const wfGot = new Float64Array(16)
+    const wfOpen = new Int32Array(16)
+    let wfWantBuf = wfWant
+    let wfGotBuf = wfGot
+    let wfOpenBuf = wfOpen
+    const ensureWf = (len: number) => {
+        if (len <= wfWantBuf.length) return
+        const next = Math.max(len, wfWantBuf.length * 2)
+        wfWantBuf = new Float64Array(next)
+        wfGotBuf = new Float64Array(next)
+        wfOpenBuf = new Int32Array(next)
+    }
+    const fillWater = (len: number, budget: number) => {
+        for (let i = 0; i < len; i++) wfGotBuf[i] = 0
+        let left = budget
+        let openLen = 0
+        for (let i = 0; i < len; i++) {
+            if (wfWantBuf[i]! > 0) wfOpenBuf[openLen++] = i
+        }
+        while (openLen > 0 && left > 1e-12) {
+            const each = left / openLen
+            let nextLen = 0
+            for (let k = 0; k < openLen; k++) {
+                const i = wfOpenBuf[k]!
+                const rem = wfWantBuf[i]! - wfGotBuf[i]!
+                const give = each < rem ? each : rem
+                wfGotBuf[i]! += give
+                left -= give
+                if (wfWantBuf[i]! - wfGotBuf[i]! > 1e-12) wfOpenBuf[nextLen++] = i
+            }
+            if (nextLen === openLen) break
+            openLen = nextLen
+        }
+    }
+    const splitOuts = new Int32Array(3)
 
     const accepts = (to: number, it: number): boolean => {
         const tn = nodes[to]!
@@ -215,10 +256,18 @@ export function solve(entities: readonly Entity[], ore: OreMap, flags: SolveFlag
             } else if (nd.t === T.Machine && nd.recipe) {
                 const r = nd.recipe
                 let c = nd.speed * DT / r.time
-                for (const [k, q] of r.need) c = Math.min(c, inb[i * NI + k]! / q)
-                c = Math.min(c, (nd.cap - total[i]!) / r.outQty)
+                for (let k = 0; k < r.need.length; k++) {
+                    const [it, q] = r.need[k]!
+                    const lim = inb[i * NI + it]! / q
+                    if (lim < c) c = lim
+                }
+                const outLim = (nd.cap - total[i]!) / r.outQty
+                if (outLim < c) c = outLim
                 if (c > 1e-12) {
-                    for (const [k, q] of r.need) inb[i * NI + k]! -= c * q
+                    for (let k = 0; k < r.need.length; k++) {
+                        const [it, q] = r.need[k]!
+                        inb[i * NI + it]! -= c * q
+                    }
                     buf[i * NI + r.out]! += c * r.outQty
                     total[i]! += c * r.outQty
                     crafted[i]! += c
@@ -234,94 +283,132 @@ export function solve(entities: readonly Entity[], ore: OreMap, flags: SolveFlag
             else if (nd.t === T.Storage) room[j] = 1e9
             else if (nd.t === T.Machine) {
                 let s = 0
-                for (const [k] of nd.recipe?.need ?? []) s += machineRoom(j, k)
+                const need = nd.recipe?.need
+                if (need) {
+                    for (let k = 0; k < need.length; k++) {
+                        const [it, q] = need[k]!
+                        const r = q * 3 - inb[j * NI + it]!
+                        if (r > 0) s += r
+                    }
+                }
                 room[j] = s
             } else room[j] = 0
             incoming[j]!.length = 0
         }
 
         // 3. Offers.
-        offers.length = 0
+        offerCount = 0
         for (let i = 0; i < n; i++) {
             const nd = nodes[i]!
             if (total[i]! <= 1e-9) continue
             const links = graph.out[i]!
-            if (!links.some(Boolean)) continue
+            if (!links.length) continue
             const send = nd.t === T.Belt || nd.t === T.Logi ? Math.min(total[i]!, nd.rate * DT) : total[i]!
             const scale = send / total[i]!
             const items = nd.items
-            const offer = (port: number, share: number, only?: (it: number) => boolean) => {
+            const offer = (port: number, share: number, filterMode: 0 | 1 | 2, filterItem: number) => {
                 const link = links[port]
                 if (!link || share <= 0) return
-                const amt = new Float64Array(NI)
+                const idx = offerCount
+                const base = idx * NI
+                offerAmt.fill(0, base, base + NI)
                 let sum = 0
-                for (const it of items) {
+                for (let m = 0; m < items.length; m++) {
+                    const it = items[m]!
                     const have = buf[i * NI + it]!
-                    if (have <= 0 || (only && !only(it)) || !accepts(link.to, it)) continue
+                    if (have <= 0) continue
+                    if (filterMode === 1 && it === filterItem) continue
+                    if (filterMode === 2 && it !== filterItem) continue
+                    if (!accepts(link.to, it)) continue
                     const a = have * scale * share
-                    amt[it] = a
+                    offerAmt[base + it] = a
                     sum += a
                 }
                 if (sum > 1e-12) {
-                    offers.push({ from: i, to: link.to, amt, sum })
-                    incoming[link.to]!.push(offers.length - 1)
+                    offerFrom[idx] = i
+                    offerTo[idx] = link.to
+                    offerSum[idx] = sum
+                    incoming[link.to]!.push(idx)
+                    offerCount++
                 }
             }
             if (nd.role === 'splitter') {
                 // Water-fill the send across the outputs that have room.
-                const outs = [0, 1, 2].filter(p => links[p])
-                const shares = waterFill(outs.map(p => room[links[p]!.to]!), send)
-                outs.forEach((p, k) => offer(p, send > 0 ? shares[k]! / send : 0))
+                let outLen = 0
+                for (let p = 0; p < 3; p++) {
+                    if (links[p]) {
+                        splitOuts[outLen] = p
+                        wfWantBuf[outLen] = room[links[p]!.to]!
+                        outLen++
+                    }
+                }
+                if (outLen > 0) {
+                    fillWater(outLen, send)
+                    for (let k = 0; k < outLen; k++) {
+                        offer(splitOuts[k]!, send > 0 ? wfGotBuf[k]! / send : 0, 0, -1)
+                    }
+                }
             } else if (nd.role === 'smart') {
                 const f = nd.filter
-                offer(0, 1, it => it !== f)
-                offer(1, 1, it => it === f)
+                offer(0, 1, 1, f)
+                offer(1, 1, 2, f)
             } else if (nd.role === 'overflow') {
                 const front = links[0] ? Math.min(send, room[links[0].to]!) : 0
-                offer(0, send > 0 ? front / send : 0)
-                offer(1, send > 0 ? (send - front) / send : 0)
+                offer(0, send > 0 ? front / send : 0, 0, -1)
+                offer(1, send > 0 ? (send - front) / send : 0, 0, -1)
             } else {
-                offer(0, 1)
+                offer(0, 1, 0, -1)
             }
         }
 
         // 4. Accept and move.
         for (let j = 0; j < n; j++) {
             const list = incoming[j]!
-            if (!list.length) continue
+            const len = list.length
+            if (!len) continue
+            ensureWf(len)
             const nd = nodes[j]!
             if (nd.t === T.Machine) {
-                for (const [k] of nd.recipe?.need ?? []) {
-                    const want = list.map(o => offers[o]!.amt[k]!)
-                    const got = waterFill(want, machineRoom(j, k))
-                    list.forEach((o, x) => {
-                        const g = got[x]!
-                        if (g <= 0) return
-                        const of = offers[o]!
-                        buf[of.from * NI + k]! -= g
-                        total[of.from]! -= g
-                        inb[j * NI + k]! += g
-                        mix[j * NI + k]! += g
-                    })
+                const need = nd.recipe?.need
+                if (need) {
+                    for (let ni = 0; ni < need.length; ni++) {
+                        const [k] = need[ni]!
+                        for (let x = 0; x < len; x++) wfWantBuf[x] = offerAmt[list[x]! * NI + k]!
+                        fillWater(len, machineRoom(j, k))
+                        for (let x = 0; x < len; x++) {
+                            const g = wfGotBuf[x]!
+                            if (g <= 0) continue
+                            const from = offerFrom[list[x]!]!
+                            buf[from * NI + k]! -= g
+                            total[from]! -= g
+                            inb[j * NI + k]! += g
+                            mix[j * NI + k]! += g
+                        }
+                    }
                 }
                 continue
             }
-            const got = waterFill(list.map(o => offers[o]!.sum), room[j]!)
-            list.forEach((o, x) => {
-                const of = offers[o]!
-                const frac = Math.min(1, got[x]! / of.sum)
-                if (frac <= 0) return
+            for (let x = 0; x < len; x++) wfWantBuf[x] = offerSum[list[x]!]!
+            fillWater(len, room[j]!)
+            for (let x = 0; x < len; x++) {
+                const o = list[x]!
+                const frac = Math.min(1, wfGotBuf[x]! / offerSum[o]!)
+                if (frac <= 0) continue
+                const from = offerFrom[o]!
+                const base = o * NI
+                const fromBase = from * NI
+                const jBase = j * NI
                 for (let it = 0; it < NI; it++) {
-                    const a = of.amt[it]! * frac
+                    const a = offerAmt[base + it]! * frac
                     if (a <= 0) continue
-                    buf[of.from * NI + it]! -= a
-                    total[of.from]! -= a
-                    mix[j * NI + it]! += a
+                    buf[fromBase + it]! -= a
+                    total[from]! -= a
+                    mix[jBase + it]! += a
                     if (nd.t === T.Storage) store[it]! += a
                     else if (nd.t === T.Lab) lab[it]! += a
-                    else { buf[j * NI + it]! += a; total[j]! += a }
+                    else { buf[jBase + it]! += a; total[j]! += a }
                 }
-            })
+            }
         }
 
         // 5. Window bookkeeping: stop once two windows agree.

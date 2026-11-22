@@ -112,8 +112,10 @@ export function accepts(e: Entity, x: number, y: number, l: number, dir: Dir): A
             if (l !== el) return null
             return dir === e.r ? 'behind' : 'side'
         case 'merger':
+            if (l !== el) return null
             return dir === e.r ? 'behind' : 'side'
         case 'splitter': case 'smart': case 'overflow':
+            if (l !== el) return null
             return dir === e.r ? 'behind' : null
         case 'ramp': {
             const inLayer = e.k === 'ramp-up' ? el : el + 1

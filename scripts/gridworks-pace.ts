@@ -694,8 +694,9 @@ function engineCheck() {
         return !!o && o !== 'oil' && o !== 'crystal'
     }
     let spot: [number, number] | null = null
-    for (let y = 40; y < 56 && !spot; y++) {
-        for (let x = 40; x < 56 && !spot; x++) {
+    const mid = (MAP_CHUNKS / 2) * CHUNK
+    for (let y = mid - CHUNK; y < mid + CHUNK && !spot; y++) {
+        for (let x = mid - CHUNK; x < mid + CHUNK && !spot; x++) {
             if (oreAt(map, x - 1, y) === 'iron-ore' && minable(x, y - 1) && minable(x, y + 1)) spot = [x, y]
         }
     }

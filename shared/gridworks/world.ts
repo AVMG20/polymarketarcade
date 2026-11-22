@@ -41,7 +41,7 @@ export function oreMap(seed: number): OreMap {
     const tiles = new Uint8Array(MAP_TILES * MAP_TILES)
     const patches: Patch[] = []
 
-    // The starting 16×16: a small patch of each early ore in its own corner, shuffled.
+    // The starting 16×16: a clean patch of each early ore in its own corner, shuffled.
     const startOres: OreId[] = ['iron-ore', 'stone', 'copper-ore', 'coal']
     for (let i = startOres.length - 1; i > 0; i--) {
         const j = rng.randomInt(0, i)
@@ -52,25 +52,48 @@ export function oreMap(seed: number): OreMap {
         const [ox, oy] = corners[i]!
         patches.push({
             ore,
-            cx: CENTER + ox! + (rng.randomFloat() - 0.5) * 1.5,
-            cy: CENTER + oy! + (rng.randomFloat() - 0.5) * 1.5,
-            r: ore === 'coal' ? 1.8 : 2.4
+            cx: CENTER + ox! + (rng.randomFloat() - 0.5) * 1.4,
+            cy: CENTER + oy! + (rng.randomFloat() - 0.5) * 1.4,
+            r: ore === 'coal' ? 2.0 : 2.5
         })
     })
 
-    // The rest of the map: richer and rarer the further out a chunk sits.
+    // Guarantee reachable oil in ring 2 and crystal in ring 3 so no seed ever starves.
+    const half = MAP_CHUNKS / 2
+    const ringChunk = (ring: number): [number, number] => {
+        const side = rng.randomInt(0, 3)
+        const span = ring * 2
+        const off = rng.randomInt(0, span - 1) - ring
+        if (side === 0) return [half + off, half - ring - 1]
+        if (side === 1) return [half + ring, half + off]
+        if (side === 2) return [half + off, half + ring]
+        return [half - ring - 1, half + off]
+    }
+    const guaranteed = new Map<string, OreId>()
+    const [ox1, oy1] = ringChunk(2)
+    guaranteed.set(`${ox1},${oy1}`, 'oil')
+    const [cx1, cy1] = ringChunk(3)
+    if (!guaranteed.has(`${cx1},${cy1}`)) guaranteed.set(`${cx1},${cy1}`, 'crystal')
+
+    // The rest of the map: richer, larger and rarer veins the further out you sprawl.
     for (let cy = 0; cy < MAP_CHUNKS; cy++) {
         for (let cx = 0; cx < MAP_CHUNKS; cx++) {
-            const d = Math.max(Math.abs(cx + 0.5 - MAP_CHUNKS / 2), Math.abs(cy + 0.5 - MAP_CHUNKS / 2))
+            const d = Math.max(Math.abs(cx + 0.5 - half), Math.abs(cy + 0.5 - half))
             if (d < 1) continue
-            const chance = d < 2 ? 0.55 : 0.75
-            if (!rng.randomChance(chance)) continue
+            const forced = guaranteed.get(`${cx},${cy}`)
+            const chance = d < 2 ? 0.62 : d < 4 ? 0.72 : 0.78
+            if (!forced && !rng.randomChance(chance)) continue
             const pool: OreId[] = ['iron-ore', 'copper-ore', 'stone', 'coal', 'iron-ore', 'copper-ore']
-            if (d >= 2) pool.push('oil', 'coal')
+            if (d >= 2) pool.push('oil', 'coal', 'stone')
             if (d >= 3) pool.push('oil', 'crystal')
-            if (d >= 4) pool.push('crystal', 'crystal')
-            const ore = rng.randomPick(pool)
-            const r = ore === 'oil' ? 1.4 + rng.randomFloat() : ore === 'crystal' ? 1.6 + rng.randomFloat() * 1.2 : 2 + rng.randomFloat() * (1 + d * 0.4)
+            if (d >= 5) pool.push('crystal', 'crystal', 'oil')
+            const ore = forced ?? rng.randomPick(pool)
+            const rich = Math.min(2.2, d * 0.24)
+            const r = ore === 'oil'
+                ? 1.6 + rng.randomFloat() * (0.9 + rich * 0.35)
+                : ore === 'crystal'
+                    ? 1.8 + rng.randomFloat() * (1.0 + rich * 0.4)
+                    : 2.1 + rng.randomFloat() * (1.1 + rich * 0.55)
             patches.push({
                 ore,
                 cx: cx * CHUNK + 2 + rng.randomFloat() * (CHUNK - 4),
