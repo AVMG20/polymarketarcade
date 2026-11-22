@@ -1,9 +1,10 @@
 # Polynux Arcade
 
-The arcade app of the Polynux platform: **Dead Front** (co-op zombies), **SHAPEZZ**, **Pirate Raid** and
-**Void Runner**. It plugs into the hub (`polymarketcore`) through `docs/platform-contract.md`: players arrive
-with a launch token, and the arcade declares its games in a manifest. It holds no coins or gems and sets no
-stars: each game keeps its own progression and currency.
+The arcade app of the Polynux platform: **Dead Front** (co-op zombies), **SHAPEZZ**, **Pirate Raid**,
+**Void Runner** and **Polytown** (the town builder). It plugs into the hub (`polymarketcore`) through
+`docs/platform-contract.md`: players arrive with a launch token, and the arcade declares its games and their
+star levels in a manifest. It holds no site coins: each game keeps its own progression and currency. Polytown
+spends platform gems at the hub for its perks; nothing in the arcade creates gems.
 
 Stack: Nuxt 4 (SPA) on Bun, SQLite through `bun:sqlite` + Drizzle, Tailwind v4, shadcn-vue, three.js.
 

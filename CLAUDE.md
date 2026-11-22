@@ -1,16 +1,23 @@
 # Polynux Arcade
 
-The arcade app of the Polynux platform: four action games ported from the old site (`nuxtpolymarket`):
-**Dead Front** (co-op zombies over WebSockets), **SHAPEZZ**, **Pirate Raid** and **Void Runner**
-(three.js). The hub (`polymarketcore`, `CORE_URL`) owns accounts, gems and stars;
-`docs/platform-contract.md` is the binding contract (a copy of the hub's; change it there and copy it).
+The arcade app of the Polynux platform: five games ported from the old site (`nuxtpolymarket`):
+**Dead Front** (co-op zombies over WebSockets), **SHAPEZZ**, **Pirate Raid**, **Void Runner** (three.js) and
+**Polytown** (the idle town builder, three.js, a shared realm and market). The hub (`polymarketcore`,
+`CORE_URL`) owns accounts, gems and stars; `docs/platform-contract.md` is the binding contract (a copy of the
+hub's; change it there and copy it).
 
-**No coins, no gems; one star per game.** The arcade never calls the hub's gem endpoints. Each game declares
-one star level (`star` in `shared/games.ts`), a milestone about halfway through it (`shared/stars.ts`);
-`server/utils/stars.ts` sends a changed level after the write that earns it, on launch, and for everyone on boot
-and hourly, with `star_reports` holding what the hub confirmed. Progression (upgrades, unlocks, saves, ship state) is per player and per game
-in the arcade's SQLite, and anything a game used to buy with coins is bought with that game's own currency,
-earned by playing it.
+**No site coins; stars per game; gems only in Polytown.** Each game declares its star levels (`stars` in
+`shared/games.ts`; rules in `shared/stars.ts`): one milestone about halfway through for the action games, five
+for Polytown (a level per 8 monument stages). `server/utils/stars.ts` sends a changed level after the write that
+earns it, on launch, and for everyone on boot and hourly, with `star_reports` holding what the hub confirmed.
+Progression (upgrades, unlocks, saves, ship state, towns) is per player and per game in the arcade's SQLite, and
+anything a game used to buy with coins is bought with that game's own currency, earned by playing it.
+
+Polytown is the one game that touches gems: its old gem perks (rushing a build, extra build crews, boosters) are
+bought with the player's platform gems through `spendGems`/`refundGems` in `server/utils/hub.ts`
+(`server/utils/polytown/gems.ts`: spend at the hub first, apply in one `writeTx` keyed by the purchase's
+idempotency key, refund if applying fails), and the page posts `wallet` to the hub after a spend. It never
+creates gems: rewards that paid gems on the old site pay boosters.
 
 ## Stack
 
@@ -39,7 +46,7 @@ the dev server to Node (bun:sqlite would not load).
 - `server/database/core.ts` (players, launch tokens), `server/database/tables/<game>.ts` (one file per game),
   `schema.ts` re-exports them all. Game tables import from `core.ts`, never from `schema.ts`.
 - `server/utils/`: platform: `env.ts` (settings and `configProblems`), `session.ts`, `launch.ts`,
-  `players.ts`, `hub.ts` (manifest, ping, stars), `stars.ts`, `manifest.ts`, `same-origin.ts`, `socket-auth.ts`.
+  `players.ts`, `hub.ts` (manifest, ping, stars, Polytown's gem spends), `stars.ts`, `manifest.ts`, `same-origin.ts`, `socket-auth.ts`.
   Game logic in `server/utils/<game>/`.
 - `server/api/`: `auth/launch`, `auth/logout`, `dev/login`, `config`, `me`, then one folder per game.
   `server/routes/healthz`. `server/plugins/`: `config-check.ts` (production refuses to start
@@ -59,8 +66,10 @@ the dev server to Node (bun:sqlite would not load).
 | SHAPEZZ | `/shapezz`, `/shapezz/workshop` | shards, banked at 45 s checkpoints (`shared/shapezz/economy.ts`) | `server/utils/shapezz.ts` | `start-run` issues a run id; `finish-run` settles it once and caps loot by the server clock |
 | Pirate Raid | `/pirates`, `/pirates/manage`, `/history`, `/leaderboard` | doubloons, paid by time afloat × sea (`shared/pirate-raid/economy.ts`) | `server/utils/pirate-raid.ts` | Pay comes from the server clock and the difficulty snapshotted at start |
 | Void Runner | `/void` | the materials you fly home (`shared/void-runner/economy.ts`) | `server/utils/void-runner.ts` | Hauls are capped by sector, hold and minutes flown; cores by accepted boss kills |
+| Polytown | `/polytown` | town coins (`polytown_state.coins_cents`, cents), earned by selling goods; boosters; platform gems for perks (`shared/polytown/`) | `server/utils/polytown/`, `server/api/polytown/ws.ts` (market invalidation) | Production settles lazily inside `writeTx`; one shared realm of plots and one order book per good; `scripts/polytown-import.ts` converts old-site saves |
 
-Each game has `scripts/<game>-economy.ts`, a sim that prints runs-to-afford per upgrade tier. Tune the curves
+Each action game has `scripts/<game>-economy.ts`, a sim that prints runs-to-afford per upgrade tier (Polytown's
+pacing sims are `scripts/polytown-balance.ts`, `-income.ts` and `-yield.ts`). Tune the curves
 in the shared config and rerun it; values stay plain integers from 1 to a few thousand. Dead Front's scripts
 run with `bun --tsconfig-override scripts/tsconfig.bun.json scripts/<name>.ts`.
 
@@ -78,7 +87,8 @@ page makes the static server redirect `/dead-front` to `/dead-front/`.
   `authorizeSocketUpgrade(request)`: `Origin` must equal `PUBLIC_URL` exactly (else 403), and the cookie must
   unseal to an existing player (else 401). Names and avatars come from the `players` row.
 - In the hub iframe (`useHubBridge().embedded`) the app posts `title` (the game's name), `star` (`apiFetch` does
-  it for any response with a `star` change) and, when the session runs out, `relaunch`. Never `wallet`.
+  it for any response with a `star` change), `wallet` (Polytown, after a gem spend, with the hub's new balance)
+  and, when the session runs out, `relaunch`.
 
 ## Server authority and randomness
 
