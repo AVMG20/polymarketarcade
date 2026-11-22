@@ -147,6 +147,14 @@ interface EntView {
     /** Belts: drawing shape, distance from the line's head (tiles), layer. */
     shape?: BeltShape
     chain?: number
+    /** Belts: how far items have travelled into the tile (0..1) and the shown backup fill. */
+    front?: number
+    jam?: number
+    jamWait?: number
+    /** Belts: the belt it feeds, the belts feeding it, and whether a non-belt feeds it. */
+    next?: EntView | null
+    feeders?: EntView[]
+    fedDirect?: boolean
     phase: number
     busy: number
     lifted?: boolean
@@ -267,6 +275,8 @@ export class GridEngine {
     private machines: EntView[] = []
     private labs: EntView[] = []
     private sol: Solution | null = null
+    /** False until the first solution lands: belts already on the plot start full, not filling. */
+    private beltsSettled = false
     private solIndex = new Map<string, number>()
     private solMixDist: (ItemDist | null)[] = []
     private solHeldDist: (ItemDist | null)[] = []
@@ -851,6 +861,21 @@ export class GridEngine {
             }
             v.shape = shape
             v.chain = chainOf(i)
+            const out = g.out[i]![0]
+            const nv = out ? idxView[out.to] : undefined
+            v.next = nv && BUILDINGS[s.entities[out!.to]!.k].role === 'belt' ? nv : null
+            v.feeders = []
+            v.fedDirect = false
+            for (const l of inc) {
+                const fv = idxView[l.from]
+                if (fv && BUILDINGS[s.entities[l.from]!.k].role === 'belt') v.feeders.push(fv)
+                else v.fedDirect = true
+            }
+            if (v.front === undefined) {
+                v.front = this.beltsSettled ? 0 : 1
+                v.jam = 0
+                v.jamWait = 0
+            }
             this.belts.push(v)
         })
         this.beltFrame = ''
@@ -2339,6 +2364,7 @@ export class GridEngine {
         this.updateBelts()
         this.updateMachines(dt)
         this.updateLabBars(dt)
+        this.updateBeltFill(dt)
         this.updateItems()
         this.updateGhost(dt)
         this.updateMove(dt)
@@ -2552,6 +2578,56 @@ export class GridEngine {
         }
     }
 
+    /**
+     * Items travel into a fresh line at belt speed, and a line that backs up fills
+     * from its jammed end, one tile after the other, instead of all at once.
+     */
+    private updateBeltFill(dt: number) {
+        const sol = this.sol
+        if (!sol) return
+        if (!this.beltsSettled) {
+            // The plot as loaded is already in its steady state.
+            this.beltsSettled = true
+            for (const v of this.belts) {
+                const fill = v.sol >= 0 ? sol.fill?.[v.sol] ?? 0 : 0
+                v.front = 1
+                v.jam = fill > 0.5 ? fill : 0
+            }
+            return
+        }
+        for (let idx = 0; idx < this.belts.length; idx++) {
+            const v = this.belts[idx]!
+            if (v.sol < 0) continue
+            const flow = sol.flow[v.sol]!
+            const fill = sol.fill?.[v.sol] ?? 0
+            const target = fill > 0.5 ? fill : 0
+            if (flow < 0.01 && !target) {
+                v.front = 0
+                v.jam = 0
+                v.jamWait = 0
+                continue
+            }
+            const speed = BELT_MK[Math.min(4, v.e.mk ?? 1) - 1]!.speed
+            if (v.front! < 1) {
+                const fed = v.fedDirect || v.feeders!.some(f => f.front! >= 1)
+                if (fed) v.front = Math.min(1, v.front! + speed * dt)
+            }
+            const jam = v.jam!
+            if (target > jam) {
+                if (v.front! < 1) continue
+                v.jamWait! += dt
+                // A tile backs up once the one after it is full (or after a while, for loops).
+                const nx = v.next
+                const nTarget = nx && nx.sol >= 0 && (sol.fill?.[nx.sol] ?? 0) > 0.5 ? sol.fill![nx.sol]! : 0
+                const downFull = !nx || !nTarget || nx.jam! >= nTarget - 0.02 || v.jamWait! > 12
+                if (downFull) v.jam = Math.min(target, jam + dt * 0.9)
+            } else {
+                v.jamWait = 0
+                v.jam = Math.max(target, jam - dt * 2.5)
+            }
+        }
+    }
+
     private updateItems() {
         const used = [0, 0, 0]
         const sol = this.sol
@@ -2567,16 +2643,21 @@ export class GridEngine {
                     const flow = sol.flow[v.sol]!
                     const fill = sol.fill?.[v.sol] ?? 0
                     // A belt whose destination won't take more backs up: it fills and slows to what drains.
-                    const jammed = fill > 0.5
-                    if (flow < 0.01 && !jammed) continue
-                    const dist = this.solMixDist[v.sol] ?? (jammed ? this.solHeldDist[v.sol] : null)
+                    const backed = fill > 0.5
+                    if (flow < 0.01 && !backed) continue
+                    const front = v.front ?? 1
+                    if (front <= 0) continue
+                    const dist = this.solMixDist[v.sol] ?? (backed ? this.solHeldDist[v.sol] : null)
                     if (!dist) continue
                     const mk = BELT_MK[Math.min(4, e.mk ?? 1) - 1]!
                     const speed = mk.speed
-                    // Items spaced by how many sit on a tile: what arrives per tile of travel, or a full jam.
-                    const perTile = Math.max(flow / speed, jammed ? 4 * fill : 0)
+                    // The backup reaches this tile once `jam` has grown; until then items still run at belt speed.
+                    const jam = v.jam ?? (backed ? fill : 0)
+                    const jammed = jam > 0.5
+                    // Items spaced by how many sit on a tile: what arrives per tile of travel, or the jam so far.
+                    const perTile = jammed ? Math.max(flow / speed, 4 * jam) : backed ? mk.rate / speed : flow / speed
                     const spacing = Math.max(0.25, 1 / perTile)
-                    const head = this.time * Math.min(speed, flow * spacing)
+                    const head = this.time * (jammed ? Math.min(speed, flow * spacing) : speed)
                     const s0 = v.chain ?? 0
                     const firstK = Math.ceil((s0 - head) / spacing)
                     const l = e.l ?? 0
@@ -2588,7 +2669,7 @@ export class GridEngine {
                         const s = head + k * spacing
                         const p = s - s0
                         if (p >= 1) break
-                        if (p < 0) continue
+                        if (p < 0 || p > front) continue
                         const item = pickDist(dist, k)
                         if (item < 0) continue
                         const slot = used[l]!
