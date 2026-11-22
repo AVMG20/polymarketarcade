@@ -1,6 +1,7 @@
 import { consumeLaunchToken, verifyLaunchToken } from '#server/utils/launch'
 import { upsertPlayer } from '#server/utils/players'
 import { setSessionPlayer } from '#server/utils/session'
+import { syncStars } from '#server/utils/stars'
 
 /** Exchange a hub launch token (`#pnx=…`) for an arcade session. */
 export default defineEventHandler(async (event) => {
@@ -12,5 +13,7 @@ export default defineEventHandler(async (event) => {
     consumeLaunchToken(claims.jti, claims.exp)
     const player = upsertPlayer(claims)
     await setSessionPlayer(event, player.id)
+    // Stars earned while the hub couldn't take them (or before the player connected there).
+    void syncStars(player.id)
     return { player }
 })

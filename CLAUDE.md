@@ -5,8 +5,10 @@ The arcade app of the Polynux platform: four action games ported from the old si
 (three.js). The hub (`polymarketcore`, `CORE_URL`) owns accounts, gems and stars;
 `docs/platform-contract.md` is the binding contract (a copy of the hub's; change it there and copy it).
 
-**No coins, no gems, no stars.** The arcade never calls the hub's gem or star endpoints and declares every
-game with zero star levels. Progression (upgrades, unlocks, saves, ship state) is per player and per game
+**No coins, no gems; one star per game.** The arcade never calls the hub's gem endpoints. Each game declares
+one star level (`star` in `shared/games.ts`), a milestone about halfway through it (`shared/stars.ts`);
+`server/utils/stars.ts` sends a changed level after the write that earns it, on launch, and for everyone on boot
+and hourly, with `star_reports` holding what the hub confirmed. Progression (upgrades, unlocks, saves, ship state) is per player and per game
 in the arcade's SQLite, and anything a game used to buy with coins is bought with that game's own currency,
 earned by playing it.
 
@@ -37,7 +39,7 @@ the dev server to Node (bun:sqlite would not load).
 - `server/database/core.ts` (players, launch tokens), `server/database/tables/<game>.ts` (one file per game),
   `schema.ts` re-exports them all. Game tables import from `core.ts`, never from `schema.ts`.
 - `server/utils/`: platform: `env.ts` (settings and `configProblems`), `session.ts`, `launch.ts`,
-  `players.ts`, `hub.ts` (manifest and ping only), `manifest.ts`, `same-origin.ts`, `socket-auth.ts`.
+  `players.ts`, `hub.ts` (manifest, ping, stars), `stars.ts`, `manifest.ts`, `same-origin.ts`, `socket-auth.ts`.
   Game logic in `server/utils/<game>/`.
 - `server/api/`: `auth/launch`, `auth/logout`, `dev/login`, `config`, `me`, then one folder per game.
   `server/routes/healthz`. `server/plugins/`: `config-check.ts` (production refuses to start
@@ -75,8 +77,8 @@ page makes the static server redirect `/dead-front` to `/dead-front/`.
 - **WebSockets** (`nitro.experimental.websocket`): authorize in the `upgrade` hook with
   `authorizeSocketUpgrade(request)`: `Origin` must equal `PUBLIC_URL` exactly (else 403), and the cookie must
   unseal to an existing player (else 401). Names and avatars come from the `players` row.
-- In the hub iframe (`useHubBridge().embedded`) the app posts `title` (the game's name) and, when the session
-  runs out, `relaunch`. Never `wallet` or `star`.
+- In the hub iframe (`useHubBridge().embedded`) the app posts `title` (the game's name), `star` (`apiFetch` does
+  it for any response with a `star` change) and, when the session runs out, `relaunch`. Never `wallet`.
 
 ## Server authority and randomness
 

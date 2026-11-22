@@ -2,9 +2,8 @@ import { FetchError, ofetch } from 'ofetch'
 import { arcadeEnv } from './env'
 
 /**
- * Client for the hub's app API (docs/platform-contract.md §2). The arcade only
- * declares its games and sends heartbeats: it holds no gems and reports no
- * stars. Every call carries the app's Bearer key and gives up after a few
+ * Client for the hub's app API (docs/platform-contract.md §2). The arcade
+ * declares its games, sends heartbeats and sets star levels; it holds no gems. Every call carries the app's Bearer key and gives up after a few
  * seconds, so a slow hub never holds an arcade request hostage.
  */
 
@@ -59,6 +58,9 @@ async function request<T>(method: 'GET' | 'PUT', path: string, body?: Record<str
 export const hub = {
     putManifest: (manifest: HubManifest) =>
         request<{ games: { slug: string, stars: number, visibility: string }[] }>('PUT', '/manifest', manifest as unknown as Record<string, unknown>),
+
+    setStars: (input: { playerId: string, game: string, stars: number, seq: number }) =>
+        request<{ applied: boolean, stars: number, best: number, bounty: number, total: number, title: string }>('PUT', '/stars', input),
 
     /** Heartbeat: tells the hub this app is alive. */
     ping: () => request<unknown>('GET', '/ping')

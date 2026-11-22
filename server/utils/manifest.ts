@@ -4,7 +4,7 @@ import { arcadeEnv } from './env'
 
 export const ARCADE_REPO_URL = 'https://github.com/AVMG20/polymarketarcade'
 
-/** What the arcade declares to the hub: every finished game, with no star levels. */
+/** What the arcade declares to the hub: every finished game, each with its one star. */
 export function arcadeManifest(): HubManifest {
     const { publicUrl } = arcadeEnv()
     return {
@@ -19,7 +19,7 @@ export function arcadeManifest(): HubManifest {
             icon: game.icon,
             cover: `${publicUrl}${game.cover}`,
             accent: game.accent,
-            stars: []
+            stars: [game.star]
         }))
     }
 }

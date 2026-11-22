@@ -1,8 +1,8 @@
 /**
  * The arcade's games: the lobby lists them and the hub manifest declares them.
- * Only games with `ready: true` are listed and declared. No game declares star
- * levels for now, and nothing here earns or costs coins or gems: progression
- * stays inside each game.
+ * Only games with `ready: true` are listed and declared. Each declares one
+ * star level, a milestone about halfway through the game (shared/stars.ts
+ * decides it); nothing here earns or costs coins or gems.
  */
 export interface ArcadeGame {
     slug: string
@@ -20,6 +20,8 @@ export interface ArcadeGame {
     /** Multiplayer games say so in the lobby. */
     multiplayer: boolean
     ready: boolean
+    /** The game's one star level (key `[a-z0-9-]{1,40}`). */
+    star: { key: string, name: string, description: string }
 }
 
 const ALL_GAMES: ArcadeGame[] = [
@@ -33,7 +35,8 @@ const ALL_GAMES: ArcadeGame[] = [
         cover: '/images/games/dead-front.jpg',
         accent: '#b4532a',
         multiplayer: true,
-        ready: true
+        ready: true,
+        star: { key: 'researcher', name: 'Researcher', description: 'Fully research three perks' }
     },
     {
         slug: 'shapezz',
@@ -45,7 +48,8 @@ const ALL_GAMES: ArcadeGame[] = [
         cover: '/images/games/shapezz.jpg',
         accent: '#e04fd0',
         multiplayer: false,
-        ready: true
+        ready: true,
+        star: { key: 'past-the-wall', name: 'Past the Wall', description: 'Reach checkpoint 10 in one run' }
     },
     {
         slug: 'pirate-raid',
@@ -57,7 +61,8 @@ const ALL_GAMES: ArcadeGame[] = [
         cover: '/images/games/pirates.jpg',
         accent: '#1f8fbf',
         multiplayer: false,
-        ready: true
+        ready: true,
+        star: { key: 'rough-waters', name: 'Rough Waters', description: 'Survive a full raid at difficulty 500 or higher' }
     },
     {
         slug: 'void-runner',
@@ -69,7 +74,8 @@ const ALL_GAMES: ArcadeGame[] = [
         cover: '/images/games/void.jpg',
         accent: '#6a5cff',
         multiplayer: false,
-        ready: true
+        ready: true,
+        star: { key: 'cinder-reach', name: 'Cinder Reach', description: 'Clear sector 2: kill its warden and fly home' }
     }
 ]
 

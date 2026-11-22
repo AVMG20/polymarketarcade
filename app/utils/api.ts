@@ -12,11 +12,15 @@ export function apiStatus(error: unknown): number | undefined {
 /**
  * $fetch for game API calls, with the payload type given explicitly. A 401
  * (the session ran out mid-play) relaunches through the hub or /connect and
- * still throws, so the caller stops.
+ * still throws, so the caller stops. A response carrying a new star level
+ * (`star: { game, stars }`) is passed on to the hub, which shows the moment.
  */
 export async function apiFetch<T>(url: string, options: Parameters<typeof $fetch>[1] = {}): Promise<T> {
     try {
-        return await $fetch<T>(url, options as never) as T
+        const result = await $fetch<T>(url, options as never) as T
+        const star = (result as { star?: { game?: unknown, stars?: unknown } | null } | null)?.star
+        if (star && typeof star.game === 'string' && typeof star.stars === 'number') useHubBridge().postStar(star.game, star.stars)
+        return result
     } catch (error) {
         useArcadeSession().handleUnauthorized(error)
         throw error

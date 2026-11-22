@@ -36,6 +36,13 @@
       "when": 1795285675083,
       "tag": "0004_void-runner",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1795333751136,
+      "tag": "0005_stars",
+      "breakpoints": true
     }
   ]
 }

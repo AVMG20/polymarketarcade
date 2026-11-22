@@ -1,5 +1,5 @@
 import { sql } from 'drizzle-orm'
-import { index, integer, sqliteTable, text } from 'drizzle-orm/sqlite-core'
+import { index, integer, primaryKey, sqliteTable, text } from 'drizzle-orm/sqlite-core'
 
 /** Platform tables and column helpers. Timestamps are Unix milliseconds. */
 
@@ -27,3 +27,11 @@ export const launchTokens = sqliteTable('launch_tokens', {
     jti: text('jti').primaryKey(),
     expiresAt: integer('expires_at', { mode: 'timestamp_ms' }).notNull()
 }, table => [index('launch_tokens_expires_idx').on(table.expiresAt)])
+
+/** The star level the hub last confirmed per player and game; a level that differs still has to be sent. */
+export const starReports = sqliteTable('star_reports', {
+    playerId: text('player_id').notNull().references(() => players.id, { onDelete: 'cascade' }),
+    game: text('game').notNull(),
+    stars: integer('stars').notNull(),
+    updatedAt: updatedAt()
+}, table => [primaryKey({ columns: [table.playerId, table.game] })])
