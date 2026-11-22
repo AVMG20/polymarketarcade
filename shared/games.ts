@@ -1,4 +1,4 @@
-import { DEAD_FRONT_ICON, PIRATE_RAID_ICON, POLYTOWN_ICON, SHAPEZZ_ICON, VOID_RUNNER_ICON } from './icons'
+import { DEAD_FRONT_ICON, GRIDWORKS_ICON, PIRATE_RAID_ICON, POLYTOWN_ICON, SHAPEZZ_ICON, VOID_RUNNER_ICON } from './icons'
 
 /**
  * The arcade's games: the lobby lists them and the hub manifest declares them.
@@ -103,6 +103,19 @@ const ALL_GAMES: ArcadeGame[] = [
             { key: 'skyline', name: 'Skyline', description: 'Finish 32 monument stages' },
             { key: 'wonders-of-the-world', name: 'Wonders of the World', description: 'Finish every stage of all five monuments' }
         ]
+    },
+    {
+        slug: 'gridworks',
+        name: 'Gridworks',
+        tagline: 'Belts, machines and a factory that runs while you are away',
+        description: 'Mine ore, string conveyor belts across your plot, research five tiers of tech and build a sprawling idle factory up to Fusion Cores.',
+        path: '/gridworks',
+        icon: GRIDWORKS_ICON,
+        cover: '/images/games/gridworks.jpg',
+        accent: '#e89b2c',
+        multiplayer: false,
+        ready: true,
+        stars: [{ key: 'assembly-line', name: 'Assembly Line', description: 'Automate motors and claim the Motors goal' }]
     }
 ]
 

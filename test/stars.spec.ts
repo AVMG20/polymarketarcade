@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { ARCADE_GAMES } from '#shared/games'
-import { deadFrontStars, pirateStars, polytownStars, shapezzStars, voidStars } from '#shared/stars'
+import { deadFrontStars, gridworksStars, pirateStars, polytownStars, shapezzStars, voidStars } from '#shared/stars'
 
 describe('arcade stars', () => {
     it('declares 1 to 10 stars per game with valid, unique keys', () => {
@@ -44,5 +44,11 @@ describe('arcade stars', () => {
     it('Void Runner: sector 2 cleared', () => {
         expect(voidStars(1)).toBe(0)
         expect(voidStars(2)).toBe(1)
+    })
+
+    it('Gridworks: Motors goal claimed', () => {
+        expect(gridworksStars([])).toBe(0)
+        expect(gridworksStars(['hand-mine', 'steel'])).toBe(0)
+        expect(gridworksStars(['hand-mine', 'motors'])).toBe(1)
     })
 })

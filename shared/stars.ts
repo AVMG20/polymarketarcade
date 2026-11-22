@@ -35,3 +35,10 @@ export const POLYTOWN_MAX_STARS = 5
 export function polytownStars(monumentStages: number): number {
     return Math.max(0, Math.min(POLYTOWN_MAX_STARS, Math.floor(monumentStages / POLYTOWN_STAGES_PER_STAR)))
 }
+
+/** Gridworks: claiming the Motors goal (tier 3, halfway through the five tiers). */
+export const GRIDWORKS_STAR_GOAL = 'motors'
+
+export function gridworksStars(goals: readonly string[]): number {
+    return goals.includes(GRIDWORKS_STAR_GOAL) ? 1 : 0
+}

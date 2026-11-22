@@ -1,9 +1,9 @@
 import { and, eq, inArray } from 'drizzle-orm'
 import { db } from '#server/database/index'
-import { deadFrontProfiles, pirateState, polytownBuildings, polytownState, polytownStorage, shapezzState, starReports, voidState } from '#server/database/schema'
+import { deadFrontProfiles, gridworksPlot, pirateState, polytownBuildings, polytownState, polytownStorage, shapezzState, starReports, voidState } from '#server/database/schema'
 import { ARCADE_GAMES } from '#shared/games'
 import { TOWN_MONUMENT_IDS } from '#shared/polytown/town-monuments'
-import { deadFrontStars, pirateStars, polytownStars, shapezzStars, voidStars } from '#shared/stars'
+import { deadFrontStars, gridworksStars, pirateStars, polytownStars, shapezzStars, voidStars } from '#shared/stars'
 import { arcadeEnv } from './env'
 import { hub, HubError } from './hub'
 
@@ -14,7 +14,7 @@ import { hub, HubError } from './hub'
  * a player who never connected there) is sent again on the next sync.
  */
 
-type Slug = 'dead-front' | 'shapezz' | 'pirate-raid' | 'void-runner' | 'polytown'
+type Slug = 'dead-front' | 'shapezz' | 'pirate-raid' | 'void-runner' | 'polytown' | 'gridworks'
 
 const LEVEL: Record<Slug, (playerId: string) => number> = {
     'dead-front': (id) => {
@@ -48,6 +48,10 @@ const LEVEL: Record<Slug, (playerId: string) => number> = {
             stages += s.level
         }
         return polytownStars(stages)
+    },
+    'gridworks': (id) => {
+        const row = db.select({ goals: gridworksPlot.goals }).from(gridworksPlot).where(eq(gridworksPlot.playerId, id)).get()
+        return row ? gridworksStars(row.goals) : 0
     }
 }
 
@@ -94,7 +98,7 @@ export async function syncStar(playerId: string, game: Slug): Promise<{ game: st
 /** Send every pending level for every player (boot and hourly): the backfill. */
 export async function syncAllStars(): Promise<number> {
     const ids = new Set<string>()
-    for (const table of [deadFrontProfiles, shapezzState, pirateState, voidState, polytownState]) {
+    for (const table of [deadFrontProfiles, shapezzState, pirateState, voidState, polytownState, gridworksPlot]) {
         for (const row of db.select({ id: table.playerId }).from(table).all()) ids.add(row.id)
     }
     let sent = 0
