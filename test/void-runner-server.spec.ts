@@ -141,9 +141,10 @@ describe('void runner value calls under a burst', () => {
 
     it('pays each daily contract once', async () => {
         const id = pilot()
-        const contract = voidContractsFor(id, voidContractDay(), 0)[0]!
+        // An alloy contract pays no alloy on top, which would muddle the check below.
+        const contract = voidContractsFor(id, voidContractDay(), 0).find(c => c.resource !== 'alloy')!
         set(id, { resources: { [contract.resource]: contract.amount * 10 } })
-        expect(await burst(() => voidClaimContract(id, 0))).toBe(1)
+        expect(await burst(() => voidClaimContract(id, contract.index))).toBe(1)
         const s = row(id)
         expect(s.resources[contract.resource]).toBe(contract.amount * 9)
         expect(s.resources.alloy).toBe(contract.alloy)
