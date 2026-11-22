@@ -3,7 +3,9 @@ import { arcadeEnv } from './env'
 
 /**
  * Client for the hub's app API (docs/platform-contract.md §2). The arcade
- * declares its games, sends heartbeats and sets star levels; it holds no gems. Every call carries the app's Bearer key and gives up after a few
+ * declares its games, sends heartbeats and sets star levels, and Polytown
+ * spends (and refunds) platform gems for its perks; the arcade never creates
+ * gems. Every call carries the app's Bearer key and gives up after a few
  * seconds, so a slow hub never holds an arcade request hostage.
  */
 
@@ -36,7 +38,7 @@ export interface HubManifest {
     games: HubManifestGame[]
 }
 
-async function request<T>(method: 'GET' | 'PUT', path: string, body?: Record<string, unknown>): Promise<T> {
+async function request<T>(method: 'GET' | 'PUT' | 'POST', path: string, body?: Record<string, unknown>): Promise<T> {
     const env = arcadeEnv()
     try {
         return await ofetch<T>(`${env.coreUrl}/api/v1${path}`, {
@@ -63,5 +65,31 @@ export const hub = {
         request<{ applied: boolean, stars: number, best: number, bounty: number, total: number, title: string }>('PUT', '/stars', input),
 
     /** Heartbeat: tells the hub this app is alive. */
-    ping: () => request<unknown>('GET', '/ping')
+    ping: () => request<unknown>('GET', '/ping'),
+
+    /** A connected player's profile and gem balance (403 for a player who never connected). */
+    getPlayer: (playerId: string) =>
+        request<{ id: string, name: string, image: string | null, gems: number, stars: number, title: string }>('GET', `/players/${encodeURIComponent(playerId)}`)
+}
+
+export interface GemSpend {
+    /** One key per purchase, 8..100 chars; a retry with the same key is charged once. */
+    idempotencyKey: string
+    playerId: string
+    amount: number
+    game: string
+    reason: string
+}
+
+/**
+ * Burn `amount` of the player's platform gems (contract §2 `POST /gems/spend`).
+ * 400 when they can't afford it; a replayed key returns the original spend.
+ */
+export function spendGems(input: GemSpend): Promise<{ spendId: string, gems: number }> {
+    return request<{ spendId: string, gems: number }>('POST', '/gems/spend', { ...input })
+}
+
+/** Give back one of this app's spends, within 24 h and once (contract §2 `POST /gems/refund`). */
+export function refundGems(spendId: string): Promise<{ gems: number }> {
+    return request<{ gems: number }>('POST', '/gems/refund', { spendId })
 }
