@@ -114,7 +114,7 @@ const ALL_GAMES: ArcadeGame[] = [
         cover: '/images/games/gridworks.jpg',
         accent: '#e89b2c',
         multiplayer: false,
-        ready: true,
+        ready: false, // disabled for now: not listed in the lobby or the hub manifest
         stars: [{ key: 'assembly-line', name: 'Assembly Line', description: 'Automate motors and claim the Motors goal' }]
     }
 ]
