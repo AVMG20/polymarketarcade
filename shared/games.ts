@@ -1,3 +1,5 @@
+import { DEAD_FRONT_ICON, PIRATE_RAID_ICON, SHAPEZZ_ICON, VOID_RUNNER_ICON } from './icons'
+
 /**
  * The arcade's games: the lobby lists them and the hub manifest declares them.
  * Only games with `ready: true` are listed and declared. Each declares one
@@ -12,7 +14,7 @@ export interface ArcadeGame {
     description: string
     /** The game's page on the arcade (also the hub's playPath). */
     path: string
-    /** A lucide icon name for the hub (`lucide:<name>`). */
+    /** The hub icon: inline SVG (shared/icons.ts). */
     icon: string
     /** Path under public/ for the cover image. */
     cover: string
@@ -31,7 +33,7 @@ const ALL_GAMES: ArcadeGame[] = [
         tagline: 'Co-op zombie rounds in a ruined 1917 chapel',
         description: 'Round-based co-op zombies for up to four players. Find weapons, research perks and see how far your squad gets.',
         path: '/dead-front',
-        icon: 'lucide:crosshair',
+        icon: DEAD_FRONT_ICON,
         cover: '/images/games/dead-front.jpg',
         accent: '#b4532a',
         multiplayer: true,
@@ -44,7 +46,7 @@ const ALL_GAMES: ArcadeGame[] = [
         tagline: 'Endless platform-shooter mayhem',
         description: 'Jump, shoot and stack mutations. Spend shards in the workshop to come back stronger.',
         path: '/shapezz',
-        icon: 'lucide:shapes',
+        icon: SHAPEZZ_ICON,
         cover: '/images/games/shapezz.jpg',
         accent: '#e04fd0',
         multiplayer: false,
@@ -57,7 +59,7 @@ const ALL_GAMES: ArcadeGame[] = [
         tagline: 'Build a warship and survive the raid',
         description: 'Arm your ship, pick a difficulty and survive a six-minute ocean raid. Doubloons buy cannons, abilities and upgrades.',
         path: '/pirates',
-        icon: 'lucide:anchor',
+        icon: PIRATE_RAID_ICON,
         cover: '/images/games/pirates.jpg',
         accent: '#1f8fbf',
         multiplayer: false,
@@ -70,7 +72,7 @@ const ALL_GAMES: ArcadeGame[] = [
         tagline: 'Third-person space shooter',
         description: 'Crack ore, fight wardens and build a dreadnought. Everything in the hangar is built from what you fly home.',
         path: '/void',
-        icon: 'lucide:rocket',
+        icon: VOID_RUNNER_ICON,
         cover: '/images/games/void.jpg',
         accent: '#6a5cff',
         multiplayer: false,

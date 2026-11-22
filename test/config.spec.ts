@@ -42,7 +42,8 @@ describe('manifest', () => {
             expect(game.playPath).toMatch(/^\/[^#\s\\]*$/)
             expect(game.cover).toMatch(/^http:\/\/arcade\.test\//)
             expect(game.accent).toMatch(/^#[0-9a-f]{6}$/i)
-            expect(game.icon).toMatch(/^lucide:[a-z0-9-]+$/)
+            expect(game.icon).toMatch(/^<svg xmlns="http:\/\/www\.w3\.org\/2000\/svg"[\s\S]*<\/svg>$/)
+            expect(game.icon.length).toBeLessThanOrEqual(16_384)
         }
     })
 })
