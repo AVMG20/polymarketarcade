@@ -6,7 +6,7 @@ import {
     chunkCost, hasKey, isUnlocked, maxMk, researchAvailable, storageLevel, upgradeCost,
     type ItemId, type Kind, type Stock
 } from './defs'
-import { key3, occupancy, placeError, rot, type Dir, type Entity, type PlaceError } from './layout'
+import { beltsUnder, key3, occupancy, placeError, rot, type Dir, type Entity, type PlaceError } from './layout'
 import { solve, type Solution, type SolveFlags } from './flow'
 import { chunkNeighbours, oreAt, oreMap } from './world'
 import { GOAL_BY_ID, currentGoal, goalMet } from './goals'
@@ -225,11 +225,17 @@ export function applyOp(s: GridState, op: Op, now: number, sol?: Solution | null
             if (!hasKey(BUILDINGS, op.e?.k)) return 'invalid'
             const e = clean(op.e)
             if (!isUnlocked(e.k, s.done)) return 'locked'
-            const err = placeError(s, oreMap(s.seed), e, s.done)
+            // Belts in the way are replaced and refunded.
+            const under = beltsUnder(s.entities, e)
+            const err = placeError(s, oreMap(s.seed), e, s.done, undefined, under)
             if (err) return err
             const cost = BUILDINGS[e.k].cost
-            if (!canAfford(s.stock, cost)) return 'afford'
-            pay(s.stock, cost)
+            const stock = { ...s.stock }
+            for (const j of under) give(stock, spentOn(s.entities[j]!))
+            if (!canAfford(stock, cost)) return 'afford'
+            pay(stock, cost)
+            s.stock = stock
+            s.entities = s.entities.filter((_, j) => !under.includes(j))
             s.entities.push(e)
             s.layout++
             return null
@@ -248,9 +254,12 @@ export function applyOp(s: GridState, op: Op, now: number, sol?: Solution | null
             const old = s.entities[i]!
             const to = op.op === 'move' ? op.to : { x: old.x, y: old.y, r: op.r }
             const next = clean({ ...old, x: to.x, y: to.y, r: to.r })
-            const err = placeError(s, oreMap(s.seed), next, s.done, undefined, i)
+            const under = beltsUnder(s.entities, next).filter(j => j !== i)
+            const err = placeError(s, oreMap(s.seed), next, s.done, undefined, [i, ...under])
             if (err) return err
+            for (const j of under) give(s.stock, spentOn(s.entities[j]!))
             s.entities[i] = next
+            s.entities = s.entities.filter((_, j) => !under.includes(j))
             s.layout++
             return null
         }

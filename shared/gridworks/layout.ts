@@ -185,8 +185,24 @@ export interface PlotLike {
 
 export type PlaceError = 'bounds' | 'land' | 'blocked' | 'ore' | 'layer' | 'locked' | 'recipe'
 
-/** Checks a placement against the plot (not the cost). `ignore` skips one entity, for moves. */
-export function placeError(plot: PlotLike, ore: OreMap, e: Entity, done: readonly string[], occ?: Map<number, number>, ignore = -1): PlaceError | null {
+/**
+ * Belts a building would replace: the plain ground belts under its footprint.
+ * Belts and ramps never replace anything; bridges above stay.
+ */
+export function beltsUnder(entities: readonly Entity[], e: Entity, occ: Map<number, number> = occupancy(entities)): number[] {
+    const role = BUILDINGS[e.k]?.role
+    if (!role || role === 'belt' || role === 'ramp' || (e.l ?? 0) !== 0) return []
+    const out = new Set<number>()
+    for (const [x, y] of tilesOf(e)) {
+        const hit = occ.get(key3(x, y, 0))
+        if (hit !== undefined && BUILDINGS[entities[hit]!.k].role === 'belt') out.add(hit)
+    }
+    return [...out]
+}
+
+/** Checks a placement against the plot (not the cost). `ignore` skips entities: the one being moved, belts it replaces. */
+export function placeError(plot: PlotLike, ore: OreMap, e: Entity, done: readonly string[], occ?: Map<number, number>, ignore: number | readonly number[] = -1): PlaceError | null {
+    const skip = typeof ignore === 'number' ? [ignore] : ignore
     const def = BUILDINGS[e.k]
     if (!def) return 'locked'
     if (def.unlock && !done.includes(def.unlock)) return 'locked'
@@ -204,7 +220,7 @@ export function placeError(plot: PlotLike, ore: OreMap, e: Entity, done: readonl
         if (!owned.has(chunkOf(x, y))) return 'land'
         for (const layer of layersOf(e)) {
             const hit = map.get(key3(x, y, layer))
-            if (hit !== undefined && hit !== ignore) return 'blocked'
+            if (hit !== undefined && !skip.includes(hit)) return 'blocked'
         }
         if (def.ore) {
             const o = oreAt(ore, x, y)

@@ -182,6 +182,25 @@ describe('gridworks settle and ops', () => {
         expect(applyOp(s, { op: 'place', e: { k: 'belt', x: 0, y: 0, r: 0 } }, now)).toBe('land')
     })
 
+    it('places buildings over belts, replacing and refunding them', () => {
+        const s = fresh()
+        s.stock = { stone: 100, 'iron-ore': 100 }
+        const x = MAP_TILES / 2 - 6
+        const y = MAP_TILES / 2 - 6
+        for (const bx of [x, x + 1, x + 2]) expect(applyOp(s, { op: 'place', e: { k: 'belt', x: bx, y, r: 0 } }, now)).toBeNull()
+        const before = { ...s.stock }
+        expect(applyOp(s, { op: 'place', e: { k: 'lab', x, y, r: 0 } }, now)).toBeNull()
+        // The two belts under the lab are gone and refunded; the third stays.
+        expect(s.entities.filter(e => e.k === 'belt').map(e => e.x)).toEqual([x + 2])
+        expect(s.stock['iron-ore']).toBe((before['iron-ore'] ?? 0) + 2 - 20)
+        expect(s.stock.stone).toBe((before.stone ?? 0) - 30)
+        // Moving the lab onto the last belt replaces it too.
+        expect(applyOp(s, { op: 'move', x, y, l: 0, to: { x: x + 1, y, r: 0 } }, now)).toBeNull()
+        expect(s.entities.some(e => e.k === 'belt')).toBe(false)
+        // Other buildings still block.
+        expect(applyOp(s, { op: 'place', e: { k: 'lab', x: MAP_TILES / 2 - 1, y: MAP_TILES / 2 - 1, r: 0 } }, now)).toBe('blocked')
+    })
+
     it('settles from dates: an hour away fills storage up to the cap', () => {
         const s = fresh()
         const [x, y] = findOre('iron-ore')

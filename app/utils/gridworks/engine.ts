@@ -3,7 +3,7 @@
 // floating refunds, sounds). Game rules live in #shared/utils/gridworks.
 import { Application, Container, Graphics, Sprite, Text, Texture, CullerPlugin, extensions, type FederatedPointerEvent } from 'pixi.js'
 import { BELT_MK, BUILDINGS, CHUNK, ITEMS, ITEM_IDS, MAP_CHUNKS, MAP_TILES, RECIPES, START_CHUNKS, chunkCost, isUnlocked, maxMk, upgradeCost, type ItemId, type Kind, type Stock } from '#shared/gridworks/defs'
-import { DIRS, accepts, buildGraph, key3, layersOf, localToWorld, occupancy, outputPorts, placeError, recipeOf, rot, size, type Dir, type Entity, type Graph, type PlaceError } from '#shared/gridworks/layout'
+import { DIRS, accepts, beltsUnder, buildGraph, key3, layersOf, localToWorld, occupancy, outputPorts, placeError, recipeOf, rot, size, type Dir, type Entity, type Graph, type PlaceError } from '#shared/gridworks/layout'
 import { canAfford, spentOn, type GridState, type Op, type OpError } from '#shared/gridworks/game'
 import type { Solution } from '#shared/gridworks/flow'
 import { chunkNeighbours, oreAt, oreMap, type OreMap } from '#shared/gridworks/world'
@@ -1618,9 +1618,15 @@ export class GridEngine {
     private ghostError(e = this.ghostEntity()): PlaceError | 'afford' | null {
         if (!e || !this.state || !this.ore) return null
         if (this.ghostTwin(e)) return null
-        const err = placeError(this.state, this.ore, e, this.state.done, this.occ)
+        const under = beltsUnder(this.state.entities, e, this.occ)
+        const err = placeError(this.state, this.ore, e, this.state.done, this.occ, under)
         if (err) return err
-        return canAfford(this.hooks.stock(), BUILDINGS[e.k].cost) ? null : 'afford'
+        // Replaced belts are refunded before the building is paid for.
+        const stock = { ...this.hooks.stock() }
+        for (const j of under) {
+            for (const [k, v] of Object.entries(spentOn(this.state.entities[j]!))) stock[k as ItemId] = (stock[k as ItemId] ?? 0) + (v as number)
+        }
+        return canAfford(stock, BUILDINGS[e.k].cost) ? null : 'afford'
     }
 
     private ghostRot(instant: boolean) {
@@ -1745,13 +1751,15 @@ export class GridEngine {
             if (first) this.reject(e.x, e.y, err)
             return
         }
+        const replaced = beltsUnder(this.state!.entities, e, this.occ).map(j => ({ ...this.state!.entities[j]! }))
         const [res] = this.hooks.commit([{ op: 'place', e }])
         if (res) {
             if (first) this.reject(e.x, e.y, res)
             return
         }
         d.placed++
-        this.pushUndo([{ op: 'remove', x: e.x, y: e.y, l: layersOf(e)[0]! }])
+        // Undo takes the building away and lays the belts it replaced back down.
+        this.pushUndo([{ op: 'remove', x: e.x, y: e.y, l: layersOf(e)[0]! }, ...replaced.map(b => ({ op: 'place' as const, e: b }))])
         const [w, h] = size(e.k, e.r)
         this.sfx.place(w * h)
         if (BUILDINGS[e.k].w * BUILDINGS[e.k].h > 1) this.drag = null
@@ -2043,7 +2051,7 @@ export class GridEngine {
     private moveError(d: Extract<Drag, { kind: 'move' }>, t: Entity): PlaceError | null {
         const s = this.state!
         const idx = s.entities.findIndex(e => e.x === d.from.x && e.y === d.from.y && e.k === d.from.k && (e.l ?? 0) === (d.from.l ?? 0))
-        return placeError(s, this.ore!, t, s.done, this.occ, idx)
+        return placeError(s, this.ore!, t, s.done, this.occ, [idx, ...beltsUnder(s.entities, t, this.occ)])
     }
 
     /** Puts a carried building down where it hovers, or back where it came from. */
@@ -2052,6 +2060,10 @@ export class GridEngine {
         const t = cancel ? { ...d.from } : this.moveTarget(d)
         const l = layersOf(d.from)[0]!
         const unchanged = t.x === d.from.x && t.y === d.from.y && t.r === d.from.r
+        const replaced = unchanged ? [] : beltsUnder(this.state!.entities, t, this.occ)
+            .map(j => this.state!.entities[j]!)
+            .filter(b => !(b.x === d.from.x && b.y === d.from.y && b.k === d.from.k))
+            .map(b => ({ ...b }))
         this.quiet = true
         const err = unchanged ? null : this.hooks.commit([{ op: 'move', x: d.from.x, y: d.from.y, l, to: { x: t.x, y: t.y, r: t.r } }])[0]
         this.quiet = false
@@ -2100,7 +2112,7 @@ export class GridEngine {
             settle(d.from)
             return
         }
-        this.pushUndo([{ op: 'move', x: t.x, y: t.y, l, to: { x: d.from.x, y: d.from.y, r: d.from.r } }])
+        this.pushUndo([{ op: 'move', x: t.x, y: t.y, l, to: { x: d.from.x, y: d.from.y, r: d.from.r } }, ...replaced.map(b => ({ op: 'place' as const, e: b }))])
         // The state diff created a new view at the target; hide it until our sprite lands.
         const fresh = this.views.get(keyOf(t))
         if (fresh && fresh !== v) {
