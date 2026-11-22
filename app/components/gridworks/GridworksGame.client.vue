@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import {
-    ArrowRight, Factory, FlaskConical, Home, Keyboard, LoaderCircle,
-    MousePointer2, Package, RotateCw, Route, Trash2, Volume2, VolumeX, X, Zap
+    ArrowRight, ArrowUpCircle, ChevronDown, ChevronUp, Factory, FlaskConical, Home, Keyboard,
+    LoaderCircle, Moon, MousePointer2, Package, RotateCw, Route, Sun, Trash2, Volume2, VolumeX, X, Zap
 } from 'lucide-vue-next'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { BUILDINGS, ITEMS, ITEM_IDS, RECIPES, RESEARCH_BY_ID, isUnlocked, maxMk, upgradeCost, type Category, type ItemId, type Kind, type Stock } from '#shared/gridworks/defs'
@@ -15,6 +15,8 @@ import { GridEngine, fmt, type HoverInfo, type Selected, type Tool } from '~/uti
 const host = ref<HTMLElement | null>(null)
 const game = useGridworks()
 const { view, stock, cap, sol, progress, loading } = game
+const colorMode = useColorMode()
+const isDark = computed(() => colorMode.value !== 'light')
 
 let engine: GridEngine | null = null
 const eng = shallowRef<GridEngine | null>(null)
@@ -25,16 +27,22 @@ const hover = ref<HoverInfo | null>(null)
 const selected = ref<Selected | null>(null)
 const muted = ref(false)
 const researchOpen = ref(false)
+const storageCollapsed = ref(false)
 const banner = ref<{ id: string, key: number } | null>(null)
 const showHelp = ref(false)
+
+watch([isDark, eng], ([dark]) => eng.value?.setTheme(dark ? 'dark' : 'light'))
+
+function toggleTheme() {
+    colorMode.preference = isDark.value ? 'light' : 'dark'
+    engine?.sfx.select()
+}
 
 // Cog's goals: the next one to claim, what it points at, and which button glows.
 const goal = computed(() => view.value ? currentGoal(view.value) : null)
 const goalDone = computed(() => !!goal.value && !!view.value && goalMet(goal.value, view.value, sol.value))
 const focus = computed<GoalFocus>(() => !goal.value || !view.value || goalDone.value ? null : goalFocus(goal.value, view.value))
 const focusKind = computed(() => focus.value?.startsWith('build:') ? focus.value.slice(6) as Kind : null)
-// The marker scans the plot's ore, so it is only worked out again when the goal
-// or the layout changes, not on every mined rock or research pick.
 let markerMemo: { key: string, marker: { x: number, y: number, w: number, h: number } | null } = { key: '', marker: null }
 const guideMarker = computed(() => {
     const g = goal.value
@@ -45,14 +53,16 @@ const guideMarker = computed(() => {
     return markerMemo.marker
 })
 watch([guideMarker, eng], ([m]) => eng.value?.setGuide(m))
-// Game shortcuts stay off while the research tree covers the plot.
 watch([researchOpen, eng], ([open]) => eng.value?.setInputLocked(open))
 
 function claimGoal(id: string) {
     engine?.sfx.unlock()
     const [err] = game.commit([{ op: 'goal', id }])
     if (err) engine?.sfx.invalid()
-    else engine?.sfx.goal()
+    else {
+        engine?.sfx.goal()
+        engine?.celebrateGoal()
+    }
 }
 
 const CATEGORIES = [
@@ -62,14 +72,11 @@ const CATEGORIES = [
     { id: 'power' as Category, label: 'Boost', icon: Zap }
 ]
 const done = computed(() => view.value?.done ?? [])
+const hasUpgrades = computed(() => done.value.some(id => id.startsWith('belt-mk') || id.startsWith('machine-mk')))
 const kindsIn = (c: Category) => (Object.keys(BUILDINGS) as Kind[]).filter(k => BUILDINGS[k].category === c && isUnlocked(k, done.value))
 const categories = computed(() => CATEGORIES.filter(c => kindsIn(c.id).length))
 const unlocked = computed(() => (Object.keys(BUILDINGS) as Kind[]).filter(k => isUnlocked(k, done.value)))
 
-// The hotbar: nine slots the player arranges (keys 1-9). The category menus list
-// everything unlocked; drag from a menu onto a slot to equip, drag between slots
-// to swap, drag a slot off the bar to clear it. A newly unlocked building drops
-// into the first free slot once, so one the player removed stays removed.
 const SLOTS = 9
 const HOTBAR_KEY = 'gridworks:hotbar'
 const SEEN_KEY = 'gridworks:hotbar-seen'
@@ -111,7 +118,6 @@ watch([unlocked, view], ([list, v]) => {
     }
 }, { immediate: true })
 
-/** The slot's building, while it is unlocked. */
 const slotKind = (i: number) => {
     const k = hotbar.value[i]
     return k && isUnlocked(k, done.value) ? k : null
@@ -152,7 +158,6 @@ function onDrop(i: number) {
 
 function onDragEnd() {
     const d = drag.value
-    // a slot dragged off the bar is cleared
     if (d && d.from !== null && !dropped) {
         const bar = [...hotbar.value]
         bar[d.from] = null
@@ -164,7 +169,6 @@ function onDragEnd() {
     dropOver.value = null
 }
 
-/** The hotbar slot holding a building, or -1. */
 const slotOf = (k: Kind) => hotbar.value.findIndex((x, i) => x === k && slotKind(i))
 
 const items = computed(() => {
@@ -174,20 +178,42 @@ const items = computed(() => {
         .map(id => ({ id, amount: stock.value[id] ?? 0, rate: (rates[id] ?? 0) * 60, full: (stock.value[id] ?? 0) >= cap.value - 0.5 }))
 })
 
+function fmtEta(sec: number): string {
+    if (!Number.isFinite(sec) || sec <= 0) return ''
+    if (sec < 60) return `${Math.ceil(sec)}s`
+    if (sec < 3600) return `${Math.floor(sec / 60)}m ${Math.round(sec % 60)}s`
+    const h = sec / 3600
+    if (h < 24) return `${h.toFixed(1)}h`
+    return `${(h / 24).toFixed(1)}d`
+}
+
 const active = computed(() => {
     const id = view.value?.queue[0]
     const node = id ? RESEARCH_BY_ID[id] : null
     if (!node) return null
     const lab = sol.value?.lab ?? {}
+    const parts = (Object.entries(node.cost) as [ItemId, number][]).map(([k, total]) => ({
+        id: k, total, got: Math.min(total, progress.value[k] ?? 0), rate: (lab[k] ?? 0) * 60, rateSec: lab[k] ?? 0
+    }))
+    let eta = 0
+    let feeding = true
+    for (const p of parts) {
+        const left = Math.max(0, p.total - p.got)
+        if (left <= 0.01) continue
+        if (p.rateSec <= 1e-6) {
+            feeding = false
+            break
+        }
+        eta = Math.max(eta, left / p.rateSec)
+    }
     return {
         node,
-        parts: (Object.entries(node.cost) as [ItemId, number][]).map(([k, total]) => ({
-            id: k, total, got: Math.min(total, progress.value[k] ?? 0), rate: (lab[k] ?? 0) * 60
-        }))
+        parts,
+        eta: feeding && eta > 0 ? fmtEta(eta) : null,
+        stalled: parts.every(p => p.rate <= 0)
     }
 })
 
-// The active research's progress, also drawn as a bar on every lab.
 const researchFrac = computed(() => {
     const a = active.value
     if (!a) return null
@@ -201,6 +227,7 @@ function spriteUrl(k: Kind) {
     return s ? `/assets/gridworks/sprites/${s}` : ''
 }
 const itemUrl = (id: ItemId) => `/assets/gridworks/sprites/items/${id}.svg`
+const researchIconUrl = (id: string) => `/assets/gridworks/sprites/research/${id}.svg`
 
 function affordable(cost: Stock) {
     return canAfford(stock.value, cost)
@@ -212,7 +239,7 @@ function pick(k: Kind) {
     else engine.setTool({ mode: 'build', kind: k })
 }
 
-function setMode(mode: 'select' | 'remove') {
+function setMode(mode: 'select' | 'remove' | 'upgrade') {
     engine?.setTool({ mode })
 }
 
@@ -220,7 +247,6 @@ function onKey(ev: KeyboardEvent) {
     const t = ev.target as HTMLElement | null
     if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) return
     if (ev.ctrlKey || ev.metaKey || ev.altKey) return
-    // With the research tree open, only T (which closes it) still counts.
     if (researchOpen.value && ev.key.toLowerCase() !== 't') return
     if (/^[1-9]$/.test(ev.key)) {
         const k = slotKind(Number(ev.key) - 1)
@@ -252,7 +278,13 @@ function research(id: string) {
     else engine?.sfx.select()
 }
 
-// Selection panel helpers.
+function unqueueResearch(id: string) {
+    engine?.sfx.unlock()
+    const [err] = game.commit([{ op: 'unqueue', id }])
+    if (err) engine?.sfx.invalid()
+    else engine?.sfx.tool()
+}
+
 const selDef = computed(() => selected.value ? BUILDINGS[selected.value.e.k] : null)
 const selRecipe = computed(() => {
     const s = selected.value
@@ -296,12 +328,12 @@ onMounted(async () => {
     game.onWorld(plots => engine?.setWorld(plots, game.me.value))
     game.onResearch((id) => {
         engine?.sfx.research()
+        engine?.celebrateResearch()
         banner.value = { id, key: Date.now() }
         if (bannerTimer) clearTimeout(bannerTimer)
         bannerTimer = setTimeout(() => { banner.value = null }, 3200)
     })
-    // The page may be left while the sprites or the plot load: stop at each step.
-    await created.init()
+    await created.init(isDark.value ? 'dark' : 'light')
     if (unmounted) return
     eng.value = created
     await game.start()
@@ -330,200 +362,264 @@ function toggleHelp() {
 </script>
 
 <template>
-  <div class="gw-root relative h-full w-full select-none overflow-hidden bg-[#15181d] text-sm text-white">
+  <div
+    class="gw-root relative h-full w-full select-none overflow-hidden text-sm"
+    :class="isDark ? 'gw-dark' : 'gw-light'"
+  >
     <div ref="host" class="absolute inset-0" />
 
-    <div v-if="loading" class="absolute inset-0 grid place-items-center bg-[#15181d]">
-      <div class="flex items-center gap-3 text-white/70">
+    <div v-if="loading" class="gw-loading absolute inset-0 grid place-items-center">
+      <div class="gw-ink-soft flex items-center gap-3">
         <LoaderCircle class="size-5 animate-spin" />
-        Loading your factory…
+        Loading factory…
       </div>
     </div>
 
     <!-- Research: top left -->
-    <div class="pointer-events-none absolute left-3 top-3 flex w-72 flex-col gap-2">
-      <div class="pointer-events-auto rounded-xl border border-white/10 bg-[#0f1115]/85 p-3 shadow-xl backdrop-blur">
-        <div class="mb-2 flex items-center justify-between">
-          <div class="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-white/50">
-            <FlaskConical class="size-4" /> Research
+    <div class="pointer-events-none absolute left-2.5 top-2.5 flex w-56 flex-col gap-1.5 sm:left-3 sm:top-3 sm:w-68">
+      <div class="gw-panel pointer-events-auto rounded-xl border p-2.5 shadow-xl backdrop-blur sm:p-3">
+        <div class="flex items-center justify-between gap-2">
+          <div class="gw-ink-muted flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider">
+            <FlaskConical class="size-3.5 text-violet-500 dark:text-violet-300" /> Research
           </div>
-          <button class="rounded-md bg-white/10 px-2 py-1 text-xs font-medium transition hover:bg-white/20 active:scale-95" :class="{ 'gw-guide': focus === 'research' }" @click="researchOpen = true">
-            Tree <kbd class="gw-kbd ml-1">T</kbd>
-          </button>
+          <div class="flex items-center gap-1.5">
+            <span v-if="active?.eta" class="font-mono text-[11px] font-semibold tabular-nums text-violet-600 dark:text-violet-300">
+              {{ active.eta }}
+            </span>
+            <Tooltip v-else-if="active?.stalled">
+              <TooltipTrigger as-child>
+                <span class="size-2 rounded-full bg-amber-400" />
+              </TooltipTrigger>
+              <TooltipContent>Belt required items into a Lab</TooltipContent>
+            </Tooltip>
+            <button
+              class="gw-btn-subtle flex items-center gap-1 rounded-md px-2 py-0.5 text-xs font-medium transition active:scale-95"
+              :class="{ 'gw-guide': focus === 'research' }"
+              @click="researchOpen = true"
+            >
+              Tree <kbd class="gw-kbd">T</kbd>
+            </button>
+          </div>
         </div>
         <template v-if="active">
-          <div class="mb-1.5 font-semibold">
-            {{ active.node.name }}
-          </div>
-          <div v-for="p in active.parts" :key="p.id" class="mb-1 flex items-center gap-2">
-            <Tooltip>
-              <TooltipTrigger as-child>
-                <img :src="itemUrl(p.id)" class="size-5" :alt="ITEMS[p.id].name">
-              </TooltipTrigger>
-              <TooltipContent>{{ ITEMS[p.id].name }}</TooltipContent>
-            </Tooltip>
-            <div class="relative h-2 flex-1 overflow-hidden rounded-full bg-white/10">
-              <div class="absolute inset-y-0 left-0 rounded-full bg-violet-400 transition-[width] duration-300" :style="{ width: `${(p.got / p.total) * 100}%` }" />
+          <div class="mt-2 flex items-center gap-2">
+            <img :src="researchIconUrl(active.node.id)" class="size-6 shrink-0" alt="">
+            <div class="truncate text-[13px] font-semibold">
+              {{ active.node.name }}
             </div>
-            <span class="w-20 text-right font-mono text-xs tabular-nums text-white/70">{{ fmt(p.got) }}/{{ fmt(p.total) }}</span>
           </div>
-          <div v-if="active.parts.every(p => p.rate <= 0)" class="mt-1 text-xs text-amber-300/90">
-            Belt these items into a lab to research.
+          <div class="mt-1.5 flex flex-col gap-1">
+            <div v-for="p in active.parts" :key="p.id" class="flex items-center gap-1.5">
+              <Tooltip>
+                <TooltipTrigger as-child>
+                  <img :src="itemUrl(p.id)" class="size-4 shrink-0" :alt="ITEMS[p.id].name">
+                </TooltipTrigger>
+                <TooltipContent>{{ ITEMS[p.id].name }}<template v-if="p.rate > 0"> (+{{ fmt(p.rate) }}/m)</template></TooltipContent>
+              </Tooltip>
+              <div class="gw-track relative h-1.5 flex-1 overflow-hidden rounded-full">
+                <div class="absolute inset-y-0 left-0 rounded-full bg-violet-500 transition-[width] duration-300 dark:bg-violet-400" :style="{ width: `${(p.got / p.total) * 100}%` }" />
+              </div>
+              <span class="gw-ink-soft w-16 text-right font-mono text-[11px] tabular-nums">{{ fmt(p.got) }}/{{ fmt(p.total) }}</span>
+            </div>
           </div>
         </template>
-        <div v-else class="text-xs text-white/60">
-          Pick a research, then belt its items into a lab.
-        </div>
+        <button
+          v-else
+          class="gw-btn-subtle mt-2 flex w-full items-center justify-center gap-1.5 rounded-lg py-1.5 text-xs font-medium transition active:scale-[0.98]"
+          :class="{ 'gw-guide': focus === 'research' }"
+          @click="researchOpen = true"
+        >
+          Pick next tech <kbd class="gw-kbd">T</kbd>
+        </button>
       </div>
     </div>
 
-    <!-- Resources: top right -->
-    <div class="pointer-events-none absolute right-3 top-3 flex flex-col items-end gap-2">
-      <div class="pointer-events-auto w-60 rounded-xl border border-white/10 bg-[#0f1115]/85 p-3 shadow-xl backdrop-blur">
-        <div class="mb-2 flex items-center justify-between text-xs font-semibold uppercase tracking-wider text-white/50">
-          <span class="flex items-center gap-2"><Package class="size-4" /> Storage</span>
-          <span class="font-mono normal-case tracking-normal text-white/40">max {{ fmt(cap) }} each</span>
-        </div>
-        <TransitionGroup name="gw-row" tag="div" class="gw-storage flex flex-col gap-1 overflow-y-auto overflow-x-hidden" :class="{ 'gw-storage-short': selected }">
-          <div v-for="it in items" :key="it.id" class="flex items-center gap-2" :title="ITEMS[it.id].name">
-            <img :src="itemUrl(it.id)" class="size-5" alt="">
-            <div class="flex-1">
-              <div class="flex items-baseline justify-between">
-                <span class="font-mono font-semibold tabular-nums" :class="it.full ? 'text-amber-300' : ''">{{ fmt(it.amount) }}</span>
-                <span v-if="it.rate > 0" class="font-mono text-xs tabular-nums text-emerald-400">+{{ fmt(it.rate) }}/m</span>
-              </div>
-              <div class="h-0.5 overflow-hidden rounded-full bg-white/5">
-                <div class="h-full rounded-full transition-[width] duration-300" :class="it.full ? 'bg-amber-300' : 'bg-white/25'" :style="{ width: `${Math.min(100, (it.amount / Math.max(1, cap)) * 100)}%` }" />
-              </div>
-            </div>
+    <!-- Storage & utility buttons: top right -->
+    <div class="pointer-events-none absolute right-2.5 top-2.5 flex flex-col items-end gap-1.5 sm:right-3 sm:top-3">
+      <div class="gw-panel pointer-events-auto w-44 rounded-xl border p-2.5 shadow-xl backdrop-blur sm:w-56 sm:p-3">
+        <button
+          class="flex w-full items-center justify-between text-[11px] font-bold uppercase tracking-wider"
+          @click="storageCollapsed = !storageCollapsed"
+        >
+          <span class="gw-ink-muted flex items-center gap-1.5"><Package class="size-3.5" /> Storage</span>
+          <span class="gw-ink-muted flex items-center gap-1 font-mono text-[11px] font-medium normal-case tracking-normal">
+            {{ fmt(cap) }}
+            <ChevronDown v-if="storageCollapsed" class="size-3.5" />
+            <ChevronUp v-else class="size-3.5" />
+          </span>
+        </button>
+        <template v-if="!storageCollapsed">
+          <TransitionGroup name="gw-row" tag="div" class="gw-storage mt-2 flex flex-col gap-1 overflow-y-auto overflow-x-hidden" :class="{ 'gw-storage-short': selected }">
+            <Tooltip v-for="it in items" :key="it.id">
+              <TooltipTrigger as-child>
+                <div class="flex items-center gap-2">
+                  <img :src="itemUrl(it.id)" class="size-4 shrink-0 sm:size-5" alt="">
+                  <div class="min-w-0 flex-1">
+                    <div class="flex items-baseline justify-between gap-1">
+                      <span class="font-mono text-xs font-semibold tabular-nums sm:text-[13px]" :class="it.full ? 'text-amber-500 dark:text-amber-300' : ''">{{ fmt(it.amount) }}</span>
+                      <span v-if="it.rate > 0" class="font-mono text-[11px] font-medium tabular-nums text-emerald-600 dark:text-emerald-400">+{{ fmt(it.rate) }}/m</span>
+                    </div>
+                    <div class="gw-track h-0.5 overflow-hidden rounded-full">
+                      <div class="h-full rounded-full transition-[width] duration-300" :class="it.full ? 'bg-amber-400' : 'gw-bar-fill'" :style="{ width: `${Math.min(100, (it.amount / Math.max(1, cap)) * 100)}%` }" />
+                    </div>
+                  </div>
+                </div>
+              </TooltipTrigger>
+              <TooltipContent side="left">{{ ITEMS[it.id].name }} · {{ Math.floor(it.amount) }} / {{ fmt(cap) }}</TooltipContent>
+            </Tooltip>
+          </TransitionGroup>
+          <div v-if="!items.length" class="gw-ink-muted mt-1.5 text-xs">
+            Empty
           </div>
-        </TransitionGroup>
-        <div v-if="!items.length" class="text-xs text-white/50">
-          Empty
-        </div>
+        </template>
       </div>
-      <div class="pointer-events-auto flex gap-1.5">
-        <button class="grid size-8 place-items-center rounded-lg border border-white/10 bg-[#0f1115]/85 transition hover:bg-white/10 active:scale-90" title="Back to my plot (H)" @click="eng?.focusPlot()">
-          <Home class="size-4" />
-        </button>
-        <button class="grid size-8 place-items-center rounded-lg border border-white/10 bg-[#0f1115]/85 transition hover:bg-white/10 active:scale-90" :title="muted ? 'Sound off' : 'Sound on'" @click="toggleMute">
-          <VolumeX v-if="muted" class="size-4" />
-          <Volume2 v-else class="size-4" />
-        </button>
+      <div class="pointer-events-auto flex gap-1">
+        <Tooltip>
+          <TooltipTrigger as-child>
+            <button class="gw-panel gw-icon-btn grid size-9 place-items-center rounded-lg border shadow-md backdrop-blur transition active:scale-90 sm:size-8" title="Center plot (H)" @click="eng?.focusPlot()">
+              <Home class="size-4" />
+            </button>
+          </TooltipTrigger>
+          <TooltipContent side="bottom">Center plot (H)</TooltipContent>
+        </Tooltip>
+        <Tooltip>
+          <TooltipTrigger as-child>
+            <button class="gw-panel gw-icon-btn grid size-9 place-items-center rounded-lg border shadow-md backdrop-blur transition active:scale-90 sm:size-8" :title="isDark ? 'Switch to light mode' : 'Switch to dark mode'" @click="toggleTheme">
+              <Sun v-if="isDark" class="size-4" />
+              <Moon v-else class="size-4" />
+            </button>
+          </TooltipTrigger>
+          <TooltipContent side="bottom">{{ isDark ? 'Light mode' : 'Dark mode' }}</TooltipContent>
+        </Tooltip>
+        <Tooltip>
+          <TooltipTrigger as-child>
+            <button class="gw-panel gw-icon-btn grid size-9 place-items-center rounded-lg border shadow-md backdrop-blur transition active:scale-90 sm:size-8" :title="muted ? 'Sound off' : 'Sound on'" @click="toggleMute">
+              <VolumeX v-if="muted" class="size-4" />
+              <Volume2 v-else class="size-4" />
+            </button>
+          </TooltipTrigger>
+          <TooltipContent side="bottom">{{ muted ? 'Unmute' : 'Mute' }}</TooltipContent>
+        </Tooltip>
       </div>
     </div>
 
     <!-- Selected building -->
     <Transition name="gw-pop">
-      <div v-if="selected && selDef" class="absolute bottom-32 right-3 w-64 rounded-xl border border-white/10 bg-[#0f1115]/90 p-3 shadow-2xl backdrop-blur">
+      <div v-if="selected && selDef" class="gw-panel absolute bottom-32 right-2.5 w-60 rounded-xl border p-3 shadow-2xl backdrop-blur sm:right-3 sm:w-64">
         <div class="mb-2 flex items-center gap-2">
           <img v-if="spriteUrl(selected.e.k)" :src="spriteUrl(selected.e.k)" class="size-9 object-contain" alt="">
-          <div class="flex-1">
-            <div class="font-semibold">
-              {{ selDef.name }} <span v-if="(selected.e.mk ?? 1) > 1" class="text-amber-300">Mk{{ selected.e.mk }}</span>
+          <div class="min-w-0 flex-1">
+            <div class="truncate font-semibold">
+              {{ selDef.name }} <span v-if="(selected.e.mk ?? 1) > 1" class="text-amber-500 dark:text-amber-300">Mk{{ selected.e.mk }}</span>
             </div>
-            <div class="text-xs text-white/50">
+            <div class="gw-ink-muted flex items-center gap-1.5 text-xs">
+              <span
+                class="size-1.5 rounded-full"
+                :class="(selected.busy > 0.05 || selected.flow > 0) ? 'bg-emerald-400' : 'bg-amber-400'"
+              />
               <template v-if="selDef.role === 'machine' || selDef.role === 'source'">
-                {{ Math.round(selected.busy * 100) }}% busy
+                {{ Math.round(selected.busy * 100) }}% active
               </template>
               <template v-else-if="selected.flow > 0">
-                {{ fmt(selected.flow * 60) }} items/min
+                {{ fmt(selected.flow * 60) }}/m
               </template>
               <template v-else>
                 Idle
               </template>
             </div>
           </div>
+          <button class="gw-icon-btn grid size-6 place-items-center rounded-md" title="Close" @click="eng?.select(null)">
+            <X class="size-3.5" />
+          </button>
         </div>
         <div v-if="selDef.recipes && selDef.recipes.length > 1" class="mb-2">
-          <div class="mb-1 text-xs text-white/50">
-            Recipe
-          </div>
           <div class="flex flex-wrap gap-1">
             <button
               v-for="r in selDef.recipes"
               :key="r"
               :disabled="recipeLocked(r)"
-              class="flex items-center gap-1 rounded-md border px-2 py-1 text-xs transition active:scale-95 disabled:opacity-40"
-              :class="selRecipe === r ? 'border-sky-400 bg-sky-400/20' : 'border-white/10 hover:bg-white/10'"
+              class="flex items-center gap-1 rounded-md border px-2 py-1 text-xs font-medium transition active:scale-95 disabled:opacity-40"
+              :class="selRecipe === r ? 'border-sky-400 bg-sky-500/20 text-sky-700 dark:text-sky-200' : 'gw-chip-btn'"
               @click="eng?.act('recipe', r)"
             >
               <img :src="itemUrl(RECIPES[r]!.out)" class="size-4" alt=""> {{ ITEMS[RECIPES[r]!.out].name }}
             </button>
           </div>
         </div>
-        <div v-if="selRecipe" class="mb-2 flex items-center gap-1 text-xs text-white/60">
+        <div v-if="selRecipe" class="gw-ink-soft mb-2 flex items-center gap-1 text-xs">
           <template v-for="([k, v], i) in costEntries(RECIPES[selRecipe]!.inputs)" :key="k">
-            <span v-if="i" class="text-white/30">+</span>
+            <span v-if="i" class="gw-ink-muted">+</span>
             <Tooltip>
               <TooltipTrigger as-child>
-                <span class="flex items-center gap-1"><img :src="itemUrl(k)" class="size-4" :alt="ITEMS[k].name">{{ v }}</span>
+                <span class="flex items-center gap-0.5 tabular-nums"><img :src="itemUrl(k)" class="size-4" :alt="ITEMS[k].name">{{ v }}</span>
               </TooltipTrigger>
               <TooltipContent>{{ ITEMS[k].name }}</TooltipContent>
             </Tooltip>
           </template>
-          <ArrowRight class="mx-0.5 size-3.5 text-white/40" />
+          <ArrowRight class="gw-ink-muted mx-0.5 size-3.5" />
           <Tooltip>
             <TooltipTrigger as-child>
-              <span class="flex items-center gap-1"><img :src="itemUrl(RECIPES[selRecipe]!.out)" class="size-4" :alt="ITEMS[RECIPES[selRecipe]!.out].name">{{ RECIPES[selRecipe]!.outQty }}</span>
+              <span class="flex items-center gap-0.5 font-semibold tabular-nums"><img :src="itemUrl(RECIPES[selRecipe]!.out)" class="size-4" :alt="ITEMS[RECIPES[selRecipe]!.out].name">{{ RECIPES[selRecipe]!.outQty }}</span>
             </TooltipTrigger>
             <TooltipContent>{{ ITEMS[RECIPES[selRecipe]!.out].name }}</TooltipContent>
           </Tooltip>
-          <span class="ml-auto text-white/40">{{ RECIPES[selRecipe]!.time }}s</span>
+          <span class="gw-ink-muted ml-auto font-mono text-[11px]">{{ RECIPES[selRecipe]!.time }}s</span>
         </div>
         <div v-if="selected.e.k === 'smart-splitter'" class="mb-2">
-          <div class="mb-1 text-xs text-white/50">
-            Sends sideways
+          <div class="gw-ink-muted mb-1 text-[11px] font-medium">
+            Filter sideways
           </div>
           <div class="flex flex-wrap gap-1">
-            <button
-              v-for="id in ITEM_IDS"
-              :key="id"
-              class="grid size-7 place-items-center rounded-md border transition active:scale-90"
-              :class="selected.e.filter === id ? 'border-amber-300 bg-amber-300/20' : 'border-white/10 hover:bg-white/10'"
-              :title="ITEMS[id].name"
-              @click="eng?.act('filter', selected.e.filter === id ? null : id)"
-            >
-              <img :src="itemUrl(id)" class="size-5" :alt="ITEMS[id].name" :title="ITEMS[id].name">
-            </button>
+            <Tooltip v-for="id in ITEM_IDS" :key="id">
+              <TooltipTrigger as-child>
+                <button
+                  class="grid size-7 place-items-center rounded-md border transition active:scale-90"
+                  :class="selected.e.filter === id ? 'border-amber-400 bg-amber-400/20' : 'gw-chip-btn'"
+                  @click="eng?.act('filter', selected.e.filter === id ? null : id)"
+                >
+                  <img :src="itemUrl(id)" class="size-5" :alt="ITEMS[id].name">
+                </button>
+              </TooltipTrigger>
+              <TooltipContent>{{ ITEMS[id].name }}</TooltipContent>
+            </Tooltip>
           </div>
         </div>
         <div v-if="selUpgrade && selUpgrade.max > 1" class="mb-2">
           <button
             v-if="selUpgrade.cost"
-            class="flex w-full items-center justify-between rounded-lg border border-amber-300/40 bg-amber-300/10 px-2 py-1.5 text-xs transition hover:bg-amber-300/20 active:scale-[0.98] disabled:opacity-40"
+            class="flex w-full items-center justify-between rounded-lg border border-amber-400/50 bg-amber-400/15 px-2 py-1.5 text-xs transition hover:bg-amber-400/25 active:scale-[0.98] disabled:opacity-40"
             :disabled="!affordable(selUpgrade.cost)"
             @click="eng?.act('upgrade')"
           >
-            <span class="font-semibold text-amber-200">Upgrade to Mk{{ selUpgrade.mk + 1 }}</span>
-            <span class="flex items-center gap-1">
+            <span class="font-semibold text-amber-700 dark:text-amber-200">Mk{{ selUpgrade.mk + 1 }}</span>
+            <span class="flex items-center gap-1.5">
               <Tooltip v-for="[k, v] in costEntries(selUpgrade.cost)" :key="k">
                 <TooltipTrigger as-child>
-                  <span class="flex items-center gap-1"><img :src="itemUrl(k)" class="size-4" :alt="ITEMS[k].name">{{ fmt(v) }}</span>
+                  <span class="flex items-center gap-0.5 tabular-nums"><img :src="itemUrl(k)" class="size-4" :alt="ITEMS[k].name">{{ fmt(v) }}</span>
                 </TooltipTrigger>
                 <TooltipContent>{{ ITEMS[k].name }}</TooltipContent>
               </Tooltip>
             </span>
           </button>
-          <div v-else class="text-xs text-white/40">
-            Max Mk for your research
+          <div v-else class="gw-ink-muted text-[11px]">
+            Max Mk
           </div>
         </div>
         <div class="flex gap-1.5">
-          <button class="flex flex-1 items-center justify-center gap-1 rounded-lg bg-white/10 py-1.5 text-xs transition hover:bg-white/20 active:scale-95" @click="eng?.act('rotate')">
-            <RotateCw class="size-3.5" /> Rotate <kbd class="gw-kbd">R</kbd>
+          <button class="gw-btn-subtle flex flex-1 items-center justify-center gap-1 rounded-lg py-1.5 text-xs font-medium transition active:scale-95" @click="eng?.act('rotate')">
+            <RotateCw class="size-3.5" /> <kbd class="gw-kbd">R</kbd>
           </button>
-          <button class="flex flex-1 items-center justify-center gap-1 rounded-lg bg-red-500/15 py-1.5 text-xs text-red-300 transition hover:bg-red-500/25 active:scale-95" @click="eng?.act('remove')">
-            <Trash2 class="size-3.5" /> Remove
+          <button class="flex flex-1 items-center justify-center gap-1 rounded-lg bg-red-500/15 py-1.5 text-xs font-medium text-red-600 transition hover:bg-red-500/25 active:scale-95 dark:text-red-300" @click="eng?.act('remove')">
+            <Trash2 class="size-3.5" /> <kbd class="gw-kbd">X</kbd>
           </button>
         </div>
       </div>
     </Transition>
 
     <!-- Build bar: bottom -->
-    <div class="pointer-events-none absolute inset-x-0 bottom-3 flex flex-col items-center gap-1.5">
-      <!-- the open category menu: click to build, drag onto the bar to equip -->
-      <div v-if="menu && menuKinds.length" class="pointer-events-auto flex flex-col items-center gap-1 rounded-2xl border border-white/10 bg-[#0f1115]/90 p-2 shadow-2xl backdrop-blur">
+    <div class="pointer-events-none absolute inset-x-0 bottom-2.5 flex flex-col items-center gap-1.5 px-2 sm:bottom-3">
+      <!-- Category drawer -->
+      <div v-if="menu && menuKinds.length" class="gw-panel pointer-events-auto flex max-w-full flex-col items-center gap-1 rounded-2xl border p-2 shadow-2xl backdrop-blur">
         <div class="flex flex-wrap justify-center gap-1.5">
           <Tooltip v-for="k in menuKinds" :key="k">
             <TooltipTrigger as-child>
@@ -539,13 +635,11 @@ function toggleHelp() {
                 <span v-if="slotOf(k) >= 0" class="gw-key">{{ slotOf(k) + 1 }}</span>
               </button>
             </TooltipTrigger>
-            <TooltipContent side="top" :side-offset="10" class="border border-white/10 bg-[#0f1115] px-3 py-2 text-white">
+            <TooltipContent side="top" :side-offset="10">
               <div class="text-xs leading-snug">
-                <div class="font-semibold">
-                  {{ BUILDINGS[k].name }}
-                </div>
-                <div class="mt-1.5 flex items-center gap-2">
-                  <span v-for="[c, v] in costEntries(BUILDINGS[k].cost)" :key="c" class="flex items-center gap-1" :class="(stock[c] ?? 0) >= v ? '' : 'text-red-400'">
+                <div class="font-semibold">{{ BUILDINGS[k].name }}</div>
+                <div class="mt-1 flex items-center gap-2">
+                  <span v-for="[c, v] in costEntries(BUILDINGS[k].cost)" :key="c" class="flex items-center gap-1 tabular-nums" :class="(stock[c] ?? 0) >= v ? '' : 'text-red-400'">
                     <img :src="itemUrl(c)" class="size-4" alt="">{{ fmt(v) }}
                   </span>
                 </div>
@@ -553,46 +647,74 @@ function toggleHelp() {
             </TooltipContent>
           </Tooltip>
         </div>
-        <div class="text-[10px] text-white/35">
-          Drag onto the bar to equip · drag off the bar to remove
-        </div>
       </div>
-      <div class="pointer-events-auto flex items-center gap-1 rounded-xl border border-white/10 bg-[#0f1115]/85 p-1 shadow-xl backdrop-blur">
+
+      <!-- Category pills -->
+      <div class="gw-panel pointer-events-auto flex max-w-full flex-wrap items-center justify-center gap-1 rounded-xl border p-1 shadow-xl backdrop-blur">
         <button
           v-for="c in categories"
           :key="c.id"
-          class="flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-xs font-medium transition active:scale-95"
-          :class="[menu === c.id ? 'bg-white/15 text-white' : 'text-white/50 hover:text-white', focusKind && menu !== c.id && slotOf(focusKind) < 0 && BUILDINGS[focusKind].category === c.id && isUnlocked(focusKind, done) ? 'gw-guide' : '']"
+          class="flex items-center gap-1 rounded-lg px-2 py-1 text-xs font-medium transition active:scale-95 sm:gap-1.5 sm:px-2.5"
+          :class="[menu === c.id ? 'gw-cat-on' : 'gw-cat-off', focusKind && menu !== c.id && slotOf(focusKind) < 0 && BUILDINGS[focusKind].category === c.id && isUnlocked(focusKind, done) ? 'gw-guide' : '']"
           @click="toggleMenu(c.id)"
         >
-          <component :is="c.icon" class="size-3.5" /> {{ c.label }}
+          <component :is="c.icon" class="size-3.5" />
+          <span class="hidden sm:inline">{{ c.label }}</span>
         </button>
-        <span class="ml-1 text-[10px] text-white/30">Tab</span>
+        <kbd class="gw-kbd ml-0.5 hidden sm:inline-flex">Tab</kbd>
       </div>
-      <div class="pointer-events-auto flex items-end gap-1.5 rounded-2xl border border-white/10 bg-[#0f1115]/90 p-2 shadow-2xl backdrop-blur">
-        <button
-          class="gw-slot"
-          :class="tool.mode === 'select' ? 'gw-slot-on' : ''"
-          title="Select and move (Esc)"
-          @click="setMode('select')"
-        >
-          <MousePointer2 class="size-6" />
-          <span class="gw-key">Esc</span>
-        </button>
-        <button
-          class="gw-slot"
-          :class="tool.mode === 'remove' ? 'gw-slot-on gw-slot-red' : ''"
-          title="Remove (X), or right-click anything"
-          @click="setMode(tool.mode === 'remove' ? 'select' : 'remove')"
-        >
-          <Trash2 class="size-6" />
-          <span class="gw-key">X</span>
-        </button>
-        <div class="mx-1 h-12 w-px self-center bg-white/10" />
-        <div class="flex items-end gap-1.5">
+
+      <!-- Hotbar -->
+      <div class="gw-panel pointer-events-auto flex max-w-full flex-wrap items-center justify-center gap-1 rounded-2xl border p-1.5 shadow-2xl backdrop-blur sm:gap-1.5 sm:p-2">
+        <Tooltip>
+          <TooltipTrigger as-child>
+            <button
+              class="gw-slot"
+              :class="tool.mode === 'select' ? 'gw-slot-on' : ''"
+              @click="setMode('select')"
+            >
+              <MousePointer2 class="size-5 sm:size-6" />
+              <span class="gw-key">Esc</span>
+            </button>
+          </TooltipTrigger>
+          <TooltipContent side="top">Select &amp; move (Esc)</TooltipContent>
+        </Tooltip>
+
+        <Tooltip v-if="hasUpgrades">
+          <TooltipTrigger as-child>
+            <button
+              class="gw-slot"
+              :class="tool.mode === 'upgrade' ? 'gw-slot-on gw-slot-gold' : ''"
+              @click="setMode(tool.mode === 'upgrade' ? 'select' : 'upgrade')"
+            >
+              <ArrowUpCircle class="size-5 sm:size-6" />
+              <span class="gw-key">U</span>
+            </button>
+          </TooltipTrigger>
+          <TooltipContent side="top">Drag-upgrade Mk (U)</TooltipContent>
+        </Tooltip>
+
+        <Tooltip>
+          <TooltipTrigger as-child>
+            <button
+              class="gw-slot"
+              :class="tool.mode === 'remove' ? 'gw-slot-on gw-slot-red' : ''"
+              @click="setMode(tool.mode === 'remove' ? 'select' : 'remove')"
+            >
+              <Trash2 class="size-5 sm:size-6" />
+              <span class="gw-key">X</span>
+            </button>
+          </TooltipTrigger>
+          <TooltipContent side="top">Remove (X or right-drag)</TooltipContent>
+        </Tooltip>
+
+        <div class="gw-sep mx-0.5 hidden h-10 w-px self-center sm:block" />
+
+        <div class="flex flex-wrap items-center justify-center gap-1 sm:gap-1.5">
           <div
             v-for="i in SLOTS"
             :key="i"
+            :class="i > 5 && !slotKind(i - 1) ? 'hidden sm:block' : ''"
             @dragover.prevent="dropOver = i - 1"
             @dragleave="dropOver === i - 1 && (dropOver = null)"
             @drop.prevent="onDrop(i - 1)"
@@ -611,13 +733,11 @@ function toggleHelp() {
                   <span class="gw-key">{{ i }}</span>
                 </button>
               </TooltipTrigger>
-              <TooltipContent side="top" :side-offset="10" class="border border-white/10 bg-[#0f1115] px-3 py-2 text-white">
+              <TooltipContent side="top" :side-offset="10">
                 <div class="text-xs leading-snug">
-                  <div class="font-semibold">
-                    {{ BUILDINGS[slotKind(i - 1)!].name }}
-                  </div>
-                  <div class="mt-1.5 flex items-center gap-2">
-                    <span v-for="[c, v] in costEntries(BUILDINGS[slotKind(i - 1)!].cost)" :key="c" class="flex items-center gap-1" :class="(stock[c] ?? 0) >= v ? '' : 'text-red-400'">
+                  <div class="font-semibold">{{ BUILDINGS[slotKind(i - 1)!].name }}</div>
+                  <div class="mt-1 flex items-center gap-2">
+                    <span v-for="[c, v] in costEntries(BUILDINGS[slotKind(i - 1)!].cost)" :key="c" class="flex items-center gap-1 tabular-nums" :class="(stock[c] ?? 0) >= v ? '' : 'text-red-400'">
                       <img :src="itemUrl(c)" class="size-4" alt="">{{ fmt(v) }}
                     </span>
                   </div>
@@ -629,41 +749,48 @@ function toggleHelp() {
             </div>
           </div>
         </div>
+
         <template v-if="done.includes('bridges')">
-          <div class="mx-1 h-12 w-px self-center bg-white/10" />
-          <button class="gw-slot" title="Belt layer (L)" @click="eng?.setLayer(layer >= (done.includes('skyway') ? 2 : 1) ? 0 : layer + 1)">
-            <div class="flex flex-col-reverse gap-0.5">
-              <div v-for="l in (done.includes('skyway') ? 3 : 2)" :key="l" class="h-1.5 w-7 rounded-sm transition" :class="l - 1 === layer ? 'bg-sky-400' : 'bg-white/20'" />
-            </div>
-            <span class="gw-key">L</span>
-          </button>
+          <div class="gw-sep mx-0.5 hidden h-10 w-px self-center sm:block" />
+          <Tooltip>
+            <TooltipTrigger as-child>
+              <button class="gw-slot" @click="eng?.setLayer(layer >= (done.includes('skyway') ? 2 : 1) ? 0 : layer + 1)">
+                <div class="flex flex-col-reverse gap-0.5">
+                  <div v-for="l in (done.includes('skyway') ? 3 : 2)" :key="l" class="h-1.5 w-6 rounded-sm transition sm:w-7" :class="l - 1 === layer ? 'bg-sky-400' : 'gw-track'" />
+                </div>
+                <span class="gw-key">L</span>
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="top">Belt layer {{ layer + 1 }} (L)</TooltipContent>
+          </Tooltip>
         </template>
       </div>
     </div>
 
     <!-- Cog and controls: bottom left -->
-    <div class="gw-corner pointer-events-none absolute left-3 flex flex-col items-start gap-2">
+    <div class="gw-corner pointer-events-none absolute left-2.5 flex flex-col items-start gap-2 sm:left-3">
       <Transition name="gw-pop">
-        <div v-if="showHelp" class="pointer-events-auto w-56 rounded-xl border border-white/10 bg-[#0f1115]/85 p-3 text-xs text-white/70 shadow-xl backdrop-blur">
-          <div class="mb-1.5 flex items-center justify-between font-semibold text-white">
-            Controls
-            <button class="text-white/40 hover:text-white" @click="toggleHelp">
+        <div v-if="showHelp" class="gw-panel pointer-events-auto w-56 rounded-xl border p-3 text-xs shadow-xl backdrop-blur">
+          <div class="mb-1.5 flex items-center justify-between font-semibold">
+            Shortcuts
+            <button class="gw-icon-btn grid size-5 place-items-center rounded" @click="toggleHelp">
               <X class="size-3.5" />
             </button>
           </div>
-          <div class="grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5">
-            <span class="text-white/40">Click ore</span><span>Mine by hand</span>
-            <span class="text-white/40">Drag</span><span>Lay belts / move</span>
-            <span class="text-white/40">R</span><span>Rotate</span>
-            <span class="text-white/40">Right-click</span><span>Remove (drag for many)</span>
-            <span class="text-white/40">Q</span><span>Copy building</span>
-            <span class="text-white/40">Ctrl+Z</span><span>Undo</span>
-            <span class="text-white/40">WASD / drag</span><span>Pan · wheel zooms</span>
+          <div class="grid grid-cols-[auto_1fr] gap-x-2.5 gap-y-0.5">
+            <span class="gw-ink-muted">Hold ore</span><span>Mine</span>
+            <span class="gw-ink-muted">Drag</span><span>Belts / move</span>
+            <span class="gw-ink-muted">R</span><span>Rotate</span>
+            <span class="gw-ink-muted">U</span><span>Drag-upgrade</span>
+            <span class="gw-ink-muted">Right-drag</span><span>Remove</span>
+            <span class="gw-ink-muted">Q</span><span>Copy / miner</span>
+            <span class="gw-ink-muted">Ctrl+Z</span><span>Undo</span>
+            <span class="gw-ink-muted">WASD</span><span>Pan · wheel zoom</span>
           </div>
         </div>
       </Transition>
       <GridworksGuide v-if="view && goal" :goal="goal" :state="view" :sol="sol" :sfx="eng?.sfx" @claim="claimGoal" @help="toggleHelp" />
-      <button v-else-if="view" class="pointer-events-auto grid size-9 place-items-center rounded-xl border border-white/10 bg-[#0f1115]/85 text-white/60 shadow-xl backdrop-blur transition hover:text-white" title="Controls" @click="toggleHelp">
+      <button v-else-if="view" class="gw-panel gw-icon-btn pointer-events-auto grid size-9 place-items-center rounded-xl border shadow-xl backdrop-blur transition" title="Controls" @click="toggleHelp">
         <Keyboard class="size-4" />
       </button>
     </div>
@@ -671,47 +798,115 @@ function toggleHelp() {
     <!-- Cursor tooltip -->
     <div
       v-if="hover && !researchOpen"
-      class="pointer-events-none fixed z-50 max-w-60 rounded-lg border border-white/10 bg-[#0f1115]/95 px-2.5 py-1.5 text-xs shadow-xl"
+      class="gw-tooltip pointer-events-none fixed z-50 max-w-60 rounded-lg border px-2.5 py-1.5 text-xs shadow-xl backdrop-blur"
       :style="{ left: `${hover.x + 18}px`, top: `${hover.y + 18}px` }"
     >
       <div class="font-semibold">
         {{ hover.title }}
       </div>
-      <div v-for="l in hover.lines" :key="l" class="text-white/60">
+      <div v-for="l in hover.lines" :key="l" class="gw-ink-soft">
         {{ l }}
       </div>
-      <div v-if="hover.error" class="text-red-400">
+      <div v-if="hover.error" class="font-medium text-red-500 dark:text-red-400">
         {{ hover.error }}
       </div>
     </div>
 
-    <!-- Research done -->
+    <!-- Research done banner -->
     <Transition name="gw-banner">
-      <div v-if="banner" :key="banner.key" class="pointer-events-none absolute left-1/2 top-6 -translate-x-1/2 rounded-2xl border border-violet-300/40 bg-violet-500/20 px-6 py-3 text-center shadow-2xl backdrop-blur">
-        <div class="text-xs font-semibold uppercase tracking-widest text-violet-200">
-          Research complete
+      <div v-if="banner" :key="banner.key" class="pointer-events-none absolute left-1/2 top-5 -translate-x-1/2 rounded-2xl border border-violet-400/50 bg-violet-600/90 px-6 py-2.5 text-center text-white shadow-2xl backdrop-blur dark:bg-violet-500/25">
+        <div class="text-[11px] font-bold uppercase tracking-widest text-violet-100 dark:text-violet-200">
+          Unlocked
         </div>
-        <div class="text-lg font-bold">
+        <div class="text-base font-bold sm:text-lg">
           {{ RESEARCH_BY_ID[banner.id]?.name }}
         </div>
       </div>
     </Transition>
 
-    <GridworksResearch v-model:open="researchOpen" :state="view" :stock="stock" @research="research" />
+    <GridworksResearch
+      v-model:open="researchOpen"
+      :state="view"
+      :stock="stock"
+      :dark="isDark"
+      @research="research"
+      @unqueue="unqueueResearch"
+    />
   </div>
 </template>
 
 <style scoped>
-/* Sizes below follow the game's own box, not the window: the site's sidebar takes a share of it. */
-.gw-root { container-type: size; }
-/* Cog sits above the build bar, and drops into the corner once the widest bar leaves room beside it. */
-.gw-corner { bottom: 8.25rem; }
-@container (min-width: 1640px) {
+.gw-root {
+  container-type: size;
+  color: var(--gw-ink);
+  background: var(--gw-bg);
+}
+.gw-dark {
+  --gw-bg: #11151c;
+  --gw-panel: rgb(15 18 25 / 0.86);
+  --gw-panel-solid: #11151e;
+  --gw-border: rgb(255 255 255 / 0.11);
+  --gw-ink: #f8fafc;
+  --gw-ink-soft: rgb(255 255 255 / 0.72);
+  --gw-ink-muted: rgb(255 255 255 / 0.48);
+  --gw-track: rgb(255 255 255 / 0.1);
+  --gw-bar: rgb(255 255 255 / 0.3);
+  --gw-chip: rgb(255 255 255 / 0.08);
+  --gw-hover: rgb(255 255 255 / 0.12);
+  --gw-slot-bg: rgb(255 255 255 / 0.05);
+  --gw-slot-border: rgb(255 255 255 / 0.09);
+  --gw-slot-empty: rgb(255 255 255 / 0.14);
+  --gw-kbd-bg: rgb(255 255 255 / 0.09);
+  --gw-kbd-border: rgb(255 255 255 / 0.18);
+  --gw-guide-border: rgb(94 234 212 / 0.3);
+  --gw-guide-pill-bg: rgb(45 212 191 / 0.16);
+  --gw-guide-pill-fg: rgb(153 246 228);
+}
+.gw-light {
+  --gw-bg: #dce4ef;
+  --gw-panel: rgb(255 255 255 / 0.88);
+  --gw-panel-solid: #ffffff;
+  --gw-border: rgb(15 23 42 / 0.12);
+  --gw-ink: #0f172a;
+  --gw-ink-soft: #334155;
+  --gw-ink-muted: #64748b;
+  --gw-track: rgb(15 23 42 / 0.09);
+  --gw-bar: #64748b;
+  --gw-chip: rgb(15 23 42 / 0.06);
+  --gw-hover: rgb(15 23 42 / 0.09);
+  --gw-slot-bg: rgb(15 23 42 / 0.04);
+  --gw-slot-border: rgb(15 23 42 / 0.11);
+  --gw-slot-empty: rgb(15 23 42 / 0.16);
+  --gw-kbd-bg: rgb(15 23 42 / 0.07);
+  --gw-kbd-border: rgb(15 23 42 / 0.15);
+  --gw-guide-border: rgb(13 148 136 / 0.35);
+  --gw-guide-pill-bg: rgb(13 148 136 / 0.12);
+  --gw-guide-pill-fg: #0f766e;
+}
+.gw-loading { background: var(--gw-bg); }
+.gw-panel { background: var(--gw-panel); border-color: var(--gw-border); color: var(--gw-ink); }
+.gw-tooltip { background: var(--gw-panel-solid); border-color: var(--gw-border); color: var(--gw-ink); }
+.gw-ink-soft { color: var(--gw-ink-soft); }
+.gw-ink-muted { color: var(--gw-ink-muted); }
+.gw-track { background: var(--gw-track); }
+.gw-bar-fill { background: var(--gw-bar); }
+.gw-sep { background: var(--gw-border); }
+.gw-btn-subtle { background: var(--gw-chip); color: var(--gw-ink); }
+.gw-btn-subtle:hover { background: var(--gw-hover); }
+.gw-chip-btn { border-color: var(--gw-border); color: var(--gw-ink); }
+.gw-chip-btn:hover { background: var(--gw-hover); }
+.gw-icon-btn { color: var(--gw-ink-soft); }
+.gw-icon-btn:hover { background: var(--gw-hover); color: var(--gw-ink); }
+.gw-cat-on { background: var(--gw-hover); color: var(--gw-ink); }
+.gw-cat-off { color: var(--gw-ink-muted); }
+.gw-cat-off:hover { color: var(--gw-ink); }
+
+.gw-corner { bottom: 8.5rem; }
+@container (min-width: 1580px) {
   .gw-corner { bottom: 0.75rem; }
 }
-/* The storage list scrolls before it reaches the build bar, or the selected building's panel. */
-.gw-storage { max-height: max(7rem, calc(100cqh - 17rem)); scrollbar-width: thin; }
-.gw-storage-short { max-height: max(7rem, calc(100cqh - 37rem)); }
+.gw-storage { max-height: max(6.5rem, calc(100cqh - 17rem)); scrollbar-width: thin; }
+.gw-storage-short { max-height: max(6.5rem, calc(100cqh - 36rem)); }
 .gw-kbd {
   display: inline-flex;
   align-items: center;
@@ -720,52 +915,65 @@ function toggleHelp() {
   min-width: 1.05rem;
   padding: 0 0.25rem;
   border-radius: 0.25rem;
-  border: 1px solid rgb(255 255 255 / 0.16);
-  background: rgb(255 255 255 / 0.08);
+  border: 1px solid var(--gw-kbd-border);
+  background: var(--gw-kbd-bg);
   font-family: var(--font-mono);
   font-size: 10px;
   line-height: 1;
-  color: rgb(255 255 255 / 0.8);
+  color: var(--gw-ink-soft);
 }
 .gw-slot {
   position: relative;
   display: grid;
   place-items: center;
-  width: 3.5rem;
-  height: 3.5rem;
-  border-radius: 0.75rem;
-  border: 1px solid rgb(255 255 255 / 0.08);
-  background: rgb(255 255 255 / 0.04);
+  width: 2.85rem;
+  height: 2.85rem;
+  border-radius: 0.7rem;
+  border: 1px solid var(--gw-slot-border);
+  background: var(--gw-slot-bg);
+  color: var(--gw-ink);
   transition: transform 140ms cubic-bezier(.3, 1.6, .5, 1), background 120ms, border-color 120ms, box-shadow 120ms;
 }
-.gw-slot:hover { background: rgb(255 255 255 / 0.1); }
+@media (min-width: 640px) {
+  .gw-slot {
+    width: 3.35rem;
+    height: 3.35rem;
+    border-radius: 0.75rem;
+  }
+}
+.gw-slot:hover { background: var(--gw-hover); }
 .gw-slot:active { transform: scale(0.92); }
 .gw-slot-on {
-  background: rgb(96 165 250 / 0.2);
-  border-color: rgb(96 165 250 / 0.8);
-  box-shadow: 0 0 0 3px rgb(96 165 250 / 0.2), 0 0 14px -4px rgb(96 165 250 / 0.6);
+  background: rgb(56 189 248 / 0.2);
+  border-color: rgb(56 189 248 / 0.85);
+  box-shadow: 0 0 0 3px rgb(56 189 248 / 0.2), 0 0 14px -4px rgb(56 189 248 / 0.55);
 }
 .gw-slot-red {
   background: rgb(248 113 113 / 0.18);
-  border-color: rgb(248 113 113 / 0.8);
+  border-color: rgb(248 113 113 / 0.85);
   box-shadow: 0 0 0 3px rgb(248 113 113 / 0.2);
 }
-.gw-slot-poor img, .gw-slot-poor svg { opacity: 0.4; filter: grayscale(0.6); }
-.gw-slot-empty { border: 1px dashed rgb(255 255 255 / 0.12); background: transparent; }
+.gw-slot-gold {
+  background: rgb(251 191 36 / 0.22);
+  border-color: rgb(251 191 36 / 0.9);
+  box-shadow: 0 0 0 3px rgb(251 191 36 / 0.2);
+}
+.gw-slot-poor img, .gw-slot-poor svg { opacity: 0.42; filter: grayscale(0.6); }
+.gw-slot-empty { border: 1px dashed var(--gw-slot-empty); background: transparent; }
 .gw-slot-empty:hover { transform: none; background: transparent; }
-.gw-slot-drop { outline: 2px solid rgb(56 189 248 / 0.8); outline-offset: 1px; background: rgb(56 189 248 / 0.12); }
+.gw-slot-drop { outline: 2px solid rgb(56 189 248 / 0.8); outline-offset: 1px; background: rgb(56 189 248 / 0.14); }
 .gw-guide { animation: gw-guide 1.3s ease-in-out infinite; }
 @keyframes gw-guide {
-  0%, 100% { box-shadow: 0 0 0 2px rgb(94 234 212 / 0.9), 0 0 0 4px rgb(94 234 212 / 0.15); }
-  50% { box-shadow: 0 0 0 2px rgb(94 234 212 / 0.9), 0 0 14px 6px rgb(94 234 212 / 0.45); }
+  0%, 100% { box-shadow: 0 0 0 2px rgb(45 212 191 / 0.9), 0 0 0 4px rgb(45 212 191 / 0.16); }
+  50% { box-shadow: 0 0 0 2px rgb(45 212 191 / 0.9), 0 0 14px 6px rgb(45 212 191 / 0.45); }
 }
 .gw-key {
   position: absolute;
   right: 3px;
   top: 2px;
-  font-size: 10px;
-  font-family: ui-monospace, monospace;
-  color: rgb(255 255 255 / 0.45);
+  font-size: 9px;
+  font-family: var(--font-mono);
+  color: var(--gw-ink-muted);
 }
 .gw-pop-enter-active, .gw-pop-leave-active { transition: opacity 160ms, transform 200ms cubic-bezier(.3, 1.4, .5, 1); }
 .gw-pop-enter-from, .gw-pop-leave-to { opacity: 0; transform: translateY(8px) scale(0.97); }
@@ -775,6 +983,4 @@ function toggleHelp() {
 .gw-banner-leave-to { opacity: 0; transform: translate(-50%, -8px); }
 .gw-row-enter-active { transition: opacity 250ms, transform 300ms cubic-bezier(.3, 1.4, .5, 1); }
 .gw-row-enter-from { opacity: 0; transform: translateX(12px); }
-.gw-slot-enter-active { transition: opacity 250ms, transform 350ms cubic-bezier(.3, 1.6, .5, 1); }
-.gw-slot-enter-from { opacity: 0; transform: translateY(14px) scale(0.6); }
 </style>

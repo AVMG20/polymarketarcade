@@ -189,9 +189,10 @@ export class GridSfx {
         this.noise(0.012, 0.06, 'highpass', 3600)
     }
 
-    upgrade() {
-        if (!this.ready('upgrade', 60)) return
-        ;[0, 4, 7, 12].forEach((s, i) => this.tone('triangle', 440 * Math.pow(2, s / 12), 440 * Math.pow(2, s / 12), 0.12, 0.12, i * 0.045))
+    upgrade(step = 0) {
+        if (!this.ready('upgrade', step > 0 ? 35 : 60)) return
+        const base = 440 * Math.pow(2, Math.min(12, step) / 12)
+        ;[0, 4, 7, 12].forEach((s, i) => this.tone('triangle', base * Math.pow(2, s / 12), base * Math.pow(2, s / 12), 0.11, 0.11, i * 0.04))
     }
 
     refund() {

@@ -2,7 +2,7 @@
 // the camera, the build tools and every bit of feedback (ghosts, pops, dust,
 // floating refunds, sounds). Game rules live in #shared/utils/gridworks.
 import { Application, Container, Graphics, Sprite, Text, Texture, CullerPlugin, extensions, type FederatedPointerEvent } from 'pixi.js'
-import { BELT_MK, BUILDINGS, CHUNK, ITEMS, ITEM_IDS, MAP_TILES, RECIPES, chunkCost, type ItemId, type Kind, type Stock } from '#shared/gridworks/defs'
+import { BELT_MK, BUILDINGS, CHUNK, ITEMS, ITEM_IDS, MAP_CHUNKS, MAP_TILES, RECIPES, START_CHUNKS, chunkCost, isUnlocked, maxMk, upgradeCost, type ItemId, type Kind, type Stock } from '#shared/gridworks/defs'
 import { DIRS, accepts, buildGraph, key3, layersOf, localToWorld, occupancy, outputPorts, placeError, recipeOf, rot, size, type Dir, type Entity, type Graph, type PlaceError } from '#shared/gridworks/layout'
 import { canAfford, spentOn, type GridState, type Op, type OpError } from '#shared/gridworks/game'
 import type { Solution } from '#shared/gridworks/flow'
@@ -12,7 +12,70 @@ import { GridSfx } from './sfx'
 
 extensions.add(CullerPlugin)
 
-export type Tool = { mode: 'select' } | { mode: 'build', kind: Kind } | { mode: 'remove' }
+export type GridTheme = 'dark' | 'light'
+
+export type Tool = { mode: 'select' } | { mode: 'build', kind: Kind } | { mode: 'remove' } | { mode: 'upgrade' }
+
+interface ThemePalette {
+    bg: number
+    unowned: number
+    owned: number
+    grid: number
+    border: number
+    otherBg: number
+    otherName: number
+    tagFill: number
+    tagAlpha: number
+    tagStroke: number
+    tagStrokeAfford: number
+    tagText: number
+    tagAffordText: number
+    textStroke: number
+    hover: number
+    guide: number
+    dust: number
+}
+
+const THEMES: Record<GridTheme, ThemePalette> = {
+    dark: {
+        bg: 0x11151c,
+        unowned: 0x161b23,
+        owned: 0x222834,
+        grid: 0x313a4a,
+        border: 0x64748b,
+        otherBg: 0x1e2430,
+        otherName: 0xe6e9ee,
+        tagFill: 0x0f1115,
+        tagAlpha: 0.82,
+        tagStroke: 0x475569,
+        tagStrokeAfford: 0x34d399,
+        tagText: 0xcbd5e1,
+        tagAffordText: 0x6ee7b7,
+        textStroke: 0x0f1115,
+        hover: 0xffffff,
+        guide: 0x2dd4bf,
+        dust: 0xc9cfd8
+    },
+    light: {
+        bg: 0xdce4ef,
+        unowned: 0xe4ebf4,
+        owned: 0xf7f9fc,
+        grid: 0xd1dbe8,
+        border: 0x64748b,
+        otherBg: 0xeef2f7,
+        otherName: 0x1e293b,
+        tagFill: 0xffffff,
+        tagAlpha: 0.92,
+        tagStroke: 0x94a3b8,
+        tagStrokeAfford: 0x059669,
+        tagText: 0x334155,
+        tagAffordText: 0x047857,
+        textStroke: 0xf8fafc,
+        hover: 0x0f172a,
+        guide: 0x0d9488,
+        dust: 0x94a3b8
+    }
+}
 
 export interface HoverInfo {
     x: number
@@ -72,6 +135,10 @@ interface EntView {
     body: Sprite
     spin?: Sprite
     icon?: Sprite
+    /** Soft working aura for active machines/labs. */
+    glow?: Sprite
+    /** Subtle status LED pip (running / idle / backed up). */
+    led?: Sprite
     /** Labs: the research progress bar and the fraction it last drew. */
     bar?: Graphics
     barAt?: number
@@ -87,6 +154,13 @@ interface EntView {
     animUntil?: number
 }
 
+interface ItemDist {
+    /** >= 0 when only a single item flows through this belt (fast O(1) path). */
+    single: number
+    ids: number[]
+    cdf: number[]
+}
+
 type Drag =
     | { kind: 'pan', sx: number, sy: number, cx: number, cy: number, moved: boolean, lastX: number, lastY: number, lastT: number }
     | { kind: 'maybe', sx: number, sy: number, view: EntView }
@@ -94,6 +168,7 @@ type Drag =
     | { kind: 'belt', start: [number, number], axis: 'x' | 'y' | null, moved: boolean, path: { x: number, y: number, r: Dir }[] }
     | { kind: 'paint', last: [number, number] | null, placed: number }
     | { kind: 'erase', last: [number, number] | null, count: number, sx: number, sy: number, moved: boolean }
+    | { kind: 'upgrade', last: [number, number] | null, count: number }
     | { kind: 'mine', x: number, y: number, next: number }
 
 function sigOf(e: Entity): string {
@@ -103,12 +178,24 @@ function keyOf(e: Entity): string {
     return `${e.x},${e.y},${layersOf(e)[0]}`
 }
 
-const MIN_ZOOM = 0.08
+const MIN_ZOOM = 0.055
+const MAX_PARTICLES = 200
 /** World text is rasterised for one of these zoom levels, the first that covers the camera. */
 const TEXT_ZOOMS = [0.5, 0.75, 1, 1.5, MAX_ZOOM]
 const BELT_FRAME_LEN = BELT_PERIOD / BELT_FRAMES
 /** The animation frame of a belt moving at `speed` tiles per second. */
 const beltFrameAt = (time: number, speed: number) => Math.floor(time * speed * TILE / BELT_FRAME_LEN) % BELT_FRAMES
+
+const GLOW_COLOR: Partial<Record<Kind, number>> = {
+    smelter: 0xfb923c,
+    kiln: 0xf97316,
+    reactor: 0xe879f9,
+    lab: 0xa78bfa,
+    assembler: 0x38bdf8,
+    mixer: 0x38bdf8,
+    refinery: 0xc084fc,
+    grinder: 0x67e8f9
+}
 
 export class GridEngine {
     readonly sfx = new GridSfx()
@@ -120,15 +207,23 @@ export class GridEngine {
     private cleanups: (() => void)[] = []
 
     // Scene graph.
+    private theme: GridTheme = 'dark'
+    private pal: ThemePalette = THEMES.dark
     private world = new Container()
     private ground = new Container()
+    private groundBg = new Graphics()
+    /** Ore sprites grouped by chunk so offscreen chunks cost zero traversal. */
+    private oreChunks: { cx: number, cy: number, key: string, c: Container }[] = []
+    private oreChunkSeed = -1
     /** Grid lines and plot outline, redrawn on zoom so they never go sub-pixel. */
     private grid = new Graphics()
     private gridZoom = 0
     private others = new Container()
-    /** Neighbour plots by user id, rebuilt only when their signature changes. */
+    private worldPlotsCache: { plots: WorldPlot[], me: string } | null = null
+    /** Neighbour plots by player id, rebuilt only when their signature changes. */
     private otherPlots = new Map<string, { sig: string, c: Container }>()
     private beltLayers = [new Container(), new Container(), new Container()]
+    private shadowLayers = [new Container(), new Container(), new Container()]
     private itemLayers = [new Container(), new Container(), new Container()]
     private entLayers = [new Container(), new Container(), new Container()]
     private overlay = new Graphics()
@@ -145,15 +240,20 @@ export class GridEngine {
     private fx = new Container()
     private buyLayer = new Container()
     /** Price tags with their half sizes, so hit tests don't measure them again. */
-    private buyTags: { key: string, tag: Container, hw: number, hh: number }[] = []
+    private buyTags: { key: string, tag: Container, bg: Graphics, text: Text, hw: number, hh: number }[] = []
+    private buyAfford = -1
     /** Text that lives in the world and is re-rasterised as the camera zooms. */
     private worldTexts = new Map<Text, number>()
     private textZoom = 0
 
     // Camera.
     private cam = { x: 0, y: 0, zoom: 0.8, tx: 0, ty: 0, tz: 0.8, vx: 0, vy: 0 }
+    private viewBounds = { x0: 0, y0: 0, x1: MAP_TILES, y1: MAP_TILES }
     private keys = new Set<string>()
     private spaceDown = false
+    /** Active touch pointers for two-finger pinch zoom & pan. */
+    private touches = new Map<number, { x: number, y: number }>()
+    private pinch: { dist: number, cx: number, cy: number } | null = null
     /** Set while a dialog covers the game: shortcuts and camera keys are ignored. */
     private locked = false
 
@@ -164,8 +264,12 @@ export class GridEngine {
     private occ = new Map<number, number>()
     private views = new Map<string, EntView>()
     private belts: EntView[] = []
+    private machines: EntView[] = []
+    private labs: EntView[] = []
     private sol: Solution | null = null
     private solIndex = new Map<string, number>()
+    private solMixDist: (ItemDist | null)[] = []
+    private solHeldDist: (ItemDist | null)[] = []
     private groundKey = ''
     private plotOrigin: [number, number] = [0, 0]
 
@@ -196,7 +300,9 @@ export class GridEngine {
     private tweens: Tween[] = []
     private particles: Particle[] = []
     private itemPool: Sprite[][] = [[], [], []]
+    private shadowPool: Sprite[][] = [[], [], []]
     private time = 0
+    private emberClock = 0
     private beltFrame = ''
     /** Set while committing ops whose motion the caller animates itself. */
     private quiet = false
@@ -206,11 +312,13 @@ export class GridEngine {
         this.hooks = hooks
     }
 
-    async init() {
+    async init(initialTheme: GridTheme = 'dark') {
+        this.theme = initialTheme
+        this.pal = THEMES[initialTheme]
         const dpr = Math.min(window.devicePixelRatio || 1, 2)
         await this.app.init({
             resizeTo: this.host,
-            background: 0x15181d,
+            background: this.pal.bg,
             antialias: true,
             resolution: Math.max(1, dpr),
             autoDensity: true,
@@ -229,8 +337,9 @@ export class GridEngine {
 
         const stage = this.app.stage
         stage.addChild(this.world)
+        this.ground.addChild(this.groundBg)
         this.world.addChild(this.others, this.ground, this.grid)
-        for (let l = 0; l < 3; l++) this.world.addChild(this.beltLayers[l]!, this.itemLayers[l]!, this.entLayers[l]!)
+        for (let l = 0; l < 3; l++) this.world.addChild(this.beltLayers[l]!, this.shadowLayers[l]!, this.itemLayers[l]!, this.entLayers[l]!)
         this.world.addChild(this.buyLayer, this.overlay, this.guide, this.ghostLayer, this.fx)
         this.ghost.addChild(this.ghostRect, this.ghostBody, this.ghostArrow)
         this.ghostBody.anchor.set(0.5)
@@ -241,6 +350,45 @@ export class GridEngine {
 
         this.bindInput()
         this.app.ticker.add(t => this.frame(t.deltaMS / 1000))
+    }
+
+    setTheme(theme: GridTheme) {
+        if (this.theme === theme) return
+        this.theme = theme
+        this.pal = THEMES[theme]
+        if (!this.tex) return
+        this.app.renderer.background.color = this.pal.bg
+        this.groundKey = ''
+        this.gridZoom = 0
+        this.guideKey = ''
+        this.ghostKey = ''
+        if (this.state) this.drawGround()
+        if (this.worldPlotsCache) {
+            for (const entry of this.otherPlots.values()) this.destroyOtherPlot(entry.c)
+            this.otherPlots.clear()
+            this.setWorld(this.worldPlotsCache.plots, this.worldPlotsCache.me)
+        }
+    }
+
+    celebrateResearch() {
+        if (!this.tex) return
+        const targets = this.labs.length ? this.labs : this.machines.filter(v => v.e.k === 'storage')
+        for (const v of targets.slice(0, 12)) {
+            const [cx, cy] = this.centerOf(v.e)
+            this.shockwave(cx, cy, TILE * 2.2, 0xa78bfa)
+            this.burst(v, 0xc4b5fd, 12)
+            this.burst(v, 0xfde047, 6)
+        }
+    }
+
+    celebrateGoal() {
+        if (!this.tex) return
+        const st = this.machines.find(v => v.e.k === 'storage') ?? this.machines[0]
+        if (!st) return
+        const [cx, cy] = this.centerOf(st.e)
+        this.shockwave(cx, cy, TILE * 2.6, this.pal.guide)
+        this.burst(st, 0x5eead4, 14)
+        this.burst(st, 0xfcd34d, 10)
     }
 
     destroy() {
@@ -285,6 +433,7 @@ export class GridEngine {
             }
         }
         this.layoutBelts()
+        this.rebuildEntityLists()
         this.mapSolution()
         this.drawGround()
         if (this.selected) {
@@ -295,14 +444,27 @@ export class GridEngine {
         if (first) this.focusPlot(true)
     }
 
+    private rebuildEntityLists() {
+        this.machines = []
+        this.labs = []
+        for (const v of this.views.values()) {
+            const role = BUILDINGS[v.e.k].role
+            if (role === 'machine' || role === 'source' || role === 'sink') this.machines.push(v)
+            if (v.e.k === 'lab') this.labs.push(v)
+        }
+    }
+
     setSolution(sol: Solution | null, entities: readonly Entity[]) {
         this.sol = sol
         this.solIndex = new Map(entities.map((e, i) => [`${keyOf(e)}|${sigOf(e)}`, i]))
+        this.solMixDist = sol ? buildDists(sol.mix, entities.length) : []
+        this.solHeldDist = sol?.held ? buildDists(sol.held, entities.length) : []
         this.mapSolution()
         if (this.selected) this.emitSelect()
     }
 
     setWorld(plots: WorldPlot[], me: string) {
+        this.worldPlotsCache = { plots, me }
         if (!this.tex) return
         const cols = Math.max(1, Math.ceil(Math.sqrt(plots.length)))
         const span = (MAP_TILES + 24) * TILE
@@ -444,16 +606,16 @@ export class GridEngine {
         const h = t.h * TILE
         // Far out, the arrow stops shrinking so it still reads as an arrow.
         const grow = Math.max(1, 0.45 / this.cam.zoom)
-        const key = `${t.x},${t.y},${t.w},${t.h}|${this.zoomStep()}`
+        const key = `${t.x},${t.y},${t.w},${t.h}|${this.zoomStep()}|${this.theme}`
         if (key !== this.guideKey) {
             this.guideKey = key
-            box.clear().roundRect(-w / 2 - 4, -h / 2 - 4, w + 8, h + 8, 14).fill({ color: 0x5eead4, alpha: 0.12 })
-                .stroke({ width: this.lineWidth(4, 2), color: 0x5eead4 })
+            box.clear().roundRect(-w / 2 - 4, -h / 2 - 4, w + 8, h + 8, 14).fill({ color: this.pal.guide, alpha: 0.14 })
+                .stroke({ width: this.lineWidth(4, 2), color: this.pal.guide })
             box.position.set((t.x + t.w / 2) * TILE, (t.y + t.h / 2) * TILE)
             // A chunky arrow pointing down at the target, tip at the origin.
             arrow.clear().moveTo(0, 0).lineTo(-18, -20).lineTo(-7, -20).lineTo(-7, -40)
                 .lineTo(7, -40).lineTo(7, -20).lineTo(18, -20).closePath()
-                .fill(0x5eead4).stroke({ width: Math.max(4, 1.5 / (this.cam.zoom * grow)), color: 0x0f1115, join: 'round' })
+                .fill(this.pal.guide).stroke({ width: Math.max(4, 1.5 / (this.cam.zoom * grow)), color: this.pal.textStroke, join: 'round' })
             arrow.scale.set(grow)
         }
         const pulse = (Math.sin(this.time * 4) + 1) / 2
@@ -545,17 +707,29 @@ export class GridEngine {
 
     private makeView(e: Entity): EntView {
         const def = BUILDINGS[e.k]
+        const [rw, rh] = size(e.k, e.r)
         const root = new Container()
         root.cullable = true
         const [cx, cy] = this.centerOf(e)
         root.position.set(cx, cy)
+        const glowColor = GLOW_COLOR[e.k]
+        let glow: Sprite | undefined
+        if (glowColor) {
+            glow = new Sprite(this.tex.glow)
+            glow.anchor.set(0.5)
+            glow.tint = glowColor
+            glow.width = (rw + 0.65) * TILE
+            glow.height = (rh + 0.65) * TILE
+            glow.alpha = 0
+            root.addChild(glow)
+        }
         const body = new Sprite(this.kindTexture(e.k))
         body.anchor.set(0.5)
         body.width = def.w * TILE
         body.height = def.h * TILE
         body.rotation = e.r * Math.PI / 2
         root.addChild(body)
-        const v: EntView = { key: keyOf(e), sig: sigOf(e), e, root, body, sol: -1, phase: Math.random() * 6.28, busy: 0 }
+        const v: EntView = { key: keyOf(e), sig: sigOf(e), e, root, body, glow, sol: -1, phase: Math.random() * 6.28, busy: 0 }
         const spinTex = this.tex.spin[e.k]
         if (spinTex) {
             v.spin = new Sprite(spinTex)
@@ -586,10 +760,19 @@ export class GridEngine {
             v.bar = new Graphics()
             root.addChild(v.bar)
         }
+        if (def.role === 'machine' || def.role === 'source') {
+            const led = new Sprite(this.tex.white)
+            led.anchor.set(0.5)
+            led.width = led.height = 6
+            led.position.set(rw * TILE / 2 - 9, -rh * TILE / 2 + 9)
+            led.tint = 0xf59e0b
+            led.alpha = 0.75
+            root.addChild(led)
+            v.led = led
+        }
         if ((e.mk ?? 1) > 1 && def.role !== 'belt') {
             const pip = new Graphics()
-            for (let i = 0; i < (e.mk ?? 1) - 1; i++) pip.circle(-def.w * TILE / 2 + 9 + i * 7, def.h * TILE / 2 - 9, 2.6).fill(0xffd34d).stroke({ width: 1.2, color: 0x2b3038 })
-            pip.rotation = 0
+            for (let i = 0; i < (e.mk ?? 1) - 1; i++) pip.circle(-rw * TILE / 2 + 9 + i * 7, rh * TILE / 2 - 9, 2.8).fill(0xffd34d).stroke({ width: 1.3, color: 0x1e2430 })
             root.addChild(pip)
         }
         const layer = def.role === 'belt' ? this.beltLayers[e.l ?? 0]! : this.entLayers[def.role === 'ramp' ? Math.min(2, (e.l ?? 0)) : 0]!
@@ -626,20 +809,35 @@ export class GridEngine {
         if (!belt) {
             const def = BUILDINGS[v.e.k]
             const [w, h] = size(v.e.k, v.e.r)
+            const [cx, cy] = this.centerOf(v.e)
             const flash = new Graphics().roundRect(-w * TILE / 2 + 3, -h * TILE / 2 + 3, w * TILE - 6, h * TILE - 6, 10).fill(0xffffff)
-            flash.alpha = 0.7
+            flash.alpha = 0.65
             root.addChild(flash)
-            this.tween(200, p => { flash.alpha = 0.7 * (1 - p) }, () => flash.destroy())
+            this.tween(200, p => { flash.alpha = 0.65 * (1 - p) }, () => flash.destroy())
+            this.shockwave(cx, cy, Math.max(w, h) * TILE * 0.95, KIND_COLOR[v.e.k] ?? this.pal.guide)
             this.dust(v, 6 + def.w * def.h * 3)
         }
     }
 
-    /** Belt shapes (straight / curves) and each tile's distance along its line. */
+    /** Belt shapes (straight / curves) and each tile's distance along its line (O(N) memoized). */
     private layoutBelts() {
         const s = this.state!
         const g = this.graph!
         this.belts = []
+        const n = s.entities.length
         const idxView: (EntView | undefined)[] = s.entities.map(e => this.views.get(keyOf(e)))
+        const memo = new Int32Array(n).fill(-1)
+        const visiting = new Uint8Array(n)
+        const chainOf = (i: number): number => {
+            if (memo[i]! >= 0) return memo[i]!
+            if (visiting[i]) return 0
+            visiting[i] = 1
+            const back = g.inc[i]!.find(l => BUILDINGS[s.entities[l.from]!.k].role === 'belt')
+            const c = back ? Math.min(400, chainOf(back.from) + 1) : 0
+            visiting[i] = 0
+            memo[i] = c
+            return c
+        }
         s.entities.forEach((e, i) => {
             const v = idxView[i]
             if (!v || BUILDINGS[e.k].role !== 'belt') return
@@ -652,17 +850,7 @@ export class GridEngine {
                 shape = fromDir === rot(e.r, 1) ? 'curveL' : 'curveR'
             }
             v.shape = shape
-            let chain = 0
-            let cur = i
-            const guard = new Set<number>()
-            while (chain < 400) {
-                guard.add(cur)
-                const back = g.inc[cur]!.find(l => BUILDINGS[s.entities[l.from]!.k].role === 'belt')
-                if (!back || guard.has(back.from)) break
-                cur = back.from
-                chain++
-            }
-            v.chain = chain
+            v.chain = chainOf(i)
             this.belts.push(v)
         })
         this.beltFrame = ''
@@ -681,7 +869,7 @@ export class GridEngine {
 
     // ---- ground -------------------------------------------------------------------
 
-    /** Lines stay at least ~1.25 screen px wide at any zoom, or every other one drops out. */
+    /** Lines stay at least 1.5 screen px wide at any zoom and dim by the area they gain when zoomed out. */
     private drawGrid() {
         const s = this.state
         if (!s) return
@@ -692,17 +880,32 @@ export class GridEngine {
         const g = this.grid
         g.clear()
         const E = CHUNK * TILE
-        for (const c of owned) {
-            const [cx, cy] = c.split(',').map(Number) as [number, number]
-            const x0 = cx * E
-            const y0 = cy * E
-            // Include the chunk edges, or two owned chunks meet without a line.
-            for (let i = 0; i <= CHUNK; i++) {
-                g.moveTo(x0 + i * TILE, y0).lineTo(x0 + i * TILE, y0 + E)
-                g.moveTo(x0, y0 + i * TILE).lineTo(x0 + E, y0 + i * TILE)
+        const minPx = 1.5
+        const tileWorldW = Math.max(1.5, minPx / z)
+        // Dim thin lines proportionally to the extra screen width they gained when zoomed out.
+        const areaDim = Math.min(1, (1.5 * z) / minPx)
+        const tileAlpha = Math.max(0.14, areaDim * (this.theme === 'light' ? 0.9 : 0.85))
+        if (z > 0.14) {
+            for (const c of owned) {
+                const [cx, cy] = c.split(',').map(Number) as [number, number]
+                const x0 = cx * E
+                const y0 = cy * E
+                for (let i = 0; i <= CHUNK; i++) {
+                    g.moveTo(x0 + i * TILE, y0).lineTo(x0 + i * TILE, y0 + E)
+                    g.moveTo(x0, y0 + i * TILE).lineTo(x0 + E, y0 + i * TILE)
+                }
             }
+            g.stroke({ width: tileWorldW, color: this.pal.grid, alpha: tileAlpha })
+        } else {
+            // At extreme zoom-out, draw chunk grid lines instead of 1-tile lines so it stays clean.
+            for (const c of owned) {
+                const [cx, cy] = c.split(',').map(Number) as [number, number]
+                const x0 = cx * E
+                const y0 = cy * E
+                g.rect(x0, y0, E, E)
+            }
+            g.stroke({ width: Math.max(2, 1.5 / z), color: this.pal.grid, alpha: 0.5 })
         }
-        g.stroke({ width: Math.max(1.5, 1.25 / z), color: 0x323843, alpha: 1 })
         for (const c of owned) {
             const [cx, cy] = c.split(',').map(Number) as [number, number]
             const x0 = cx * E
@@ -712,51 +915,75 @@ export class GridEngine {
             if (!owned.has(`${cx - 1},${cy}`)) g.moveTo(x0, y0).lineTo(x0, y0 + E)
             if (!owned.has(`${cx + 1},${cy}`)) g.moveTo(x0 + E, y0).lineTo(x0 + E, y0 + E)
         }
-        g.stroke({ width: Math.max(4, 2 / z), color: 0x5b6575, alpha: 0.9 })
+        g.stroke({ width: Math.max(4, 2 / z), color: this.pal.border, alpha: 0.92 })
+    }
+
+    /** Builds ore sprites once per seed, grouped per chunk so offscreen chunks cost zero work. */
+    private ensureOreChunks(seed: number) {
+        if (this.oreChunkSeed === seed && this.oreChunks.length) return
+        this.oreChunkSeed = seed
+        for (const ch of this.oreChunks) {
+            this.ground.removeChild(ch.c)
+            ch.c.destroy({ children: true })
+        }
+        this.oreChunks = []
+        const ore = this.ore!
+        for (let cy = 0; cy < MAP_CHUNKS; cy++) {
+            for (let cx = 0; cx < MAP_CHUNKS; cx++) {
+                let c: Container | null = null
+                for (let y = cy * CHUNK; y < (cy + 1) * CHUNK; y++) {
+                    for (let x = cx * CHUNK; x < (cx + 1) * CHUNK; x++) {
+                        const o = oreAt(ore, x, y)
+                        if (!o) continue
+                        if (!c) c = new Container()
+                        const h = ((x * 73856093) ^ (y * 19349663)) >>> 0
+                        const sp = new Sprite(this.tex.ore[o][h % 3])
+                        sp.anchor.set(0.5)
+                        sp.position.set((x + 0.5) * TILE, (y + 0.5) * TILE)
+                        sp.width = sp.height = TILE
+                        if (o !== 'crystal' && (h >> 5) & 1) sp.scale.x *= -1
+                        c.addChild(sp)
+                    }
+                }
+                if (c) {
+                    const key = `${cx},${cy}`
+                    this.ground.addChild(c)
+                    this.oreChunks.push({ cx, cy, key, c })
+                }
+            }
+        }
     }
 
     private drawGround() {
         const s = this.state!
         const buyable = s.done.includes('land-1')
-        const key = `${s.seed}|${s.chunks.join(';')}|${buyable}|${Math.floor(this.buyCostKey())}`
+        const key = `${s.seed}|${s.chunks.join(';')}|${buyable}|${this.theme}`
         if (key === this.groundKey) return
         this.groundKey = key
-        this.ground.removeChildren().forEach(c => c.destroy({ children: true }))
+        this.ensureOreChunks(s.seed)
+        const owned = new Set(s.chunks)
+        const g = this.groundBg
+        g.clear()
+        // Unowned map: subtle frontier tint so ore you could expand to stays legible.
+        g.rect(0, 0, MAP_TILES * TILE, MAP_TILES * TILE).fill(this.pal.unowned)
+        for (const c of owned) {
+            const [cx, cy] = c.split(',').map(Number) as [number, number]
+            g.rect(cx * CHUNK * TILE, cy * CHUNK * TILE, CHUNK * TILE, CHUNK * TILE).fill(this.pal.owned)
+        }
+        const dimAlpha = this.theme === 'light' ? 0.42 : 0.48
+        for (const ch of this.oreChunks) {
+            ch.c.alpha = owned.has(ch.key) ? 1 : dimAlpha
+        }
+        this.gridZoom = 0
+
         for (const { tag } of this.buyTags) for (const child of tag.children) if (child instanceof Text) this.worldTexts.delete(child)
         this.buyTags = []
         this.buyLayer.removeChildren().forEach(c => c.destroy({ children: true }))
-        const owned = new Set(s.chunks)
-        const g = new Graphics()
-        const ore = this.ore!
-        // Unowned map: dim tiles so the ore you could buy is still readable.
-        g.rect(0, 0, MAP_TILES * TILE, MAP_TILES * TILE).fill(0x181b21)
-        for (const c of owned) {
-            const [cx, cy] = c.split(',').map(Number) as [number, number]
-            g.rect(cx * CHUNK * TILE, cy * CHUNK * TILE, CHUNK * TILE, CHUNK * TILE).fill(0x262b33)
-        }
-        this.ground.addChild(g)
-        this.gridZoom = 0
-        // Ore tiles: one of three variants per ore, picked by tile hash.
-        for (let y = 0; y < MAP_TILES; y++) {
-            for (let x = 0; x < MAP_TILES; x++) {
-                const o = oreAt(ore, x, y)
-                if (!o) continue
-                const own = owned.has(`${Math.floor(x / CHUNK)},${Math.floor(y / CHUNK)}`)
-                const h = ((x * 73856093) ^ (y * 19349663)) >>> 0
-                const sp = new Sprite(this.tex.ore[o][h % 3])
-                sp.anchor.set(0.5)
-                sp.position.set((x + 0.5) * TILE, (y + 0.5) * TILE)
-                sp.width = sp.height = TILE
-                // The art is lit from the top left, so only a horizontal flip is safe (not for crystal shards).
-                if (o !== 'crystal' && (h >> 5) & 1) sp.scale.x *= -1
-                sp.alpha = own ? 1 : 0.5
-                sp.cullable = true
-                this.ground.addChild(sp)
-            }
-        }
-        // Buyable neighbours get a price tag.
+        this.buyAfford = -1
+
+        // Buyable neighbours get a crisp price tag.
         if (buyable) {
-            const cost = chunkCost(s.chunks.length - 4)
+            const cost = chunkCost(s.chunks.length - START_CHUNKS.length)
             const label = Object.entries(cost).map(([k, v]) => `${fmt(v as number)} ${ITEMS[k as ItemId].name.toLowerCase()}`).join(' + ')
             const seen = new Set<string>()
             for (const c of owned) {
@@ -766,24 +993,43 @@ export class GridEngine {
                     const [cx, cy] = n.split(',').map(Number) as [number, number]
                     const tag = new Container()
                     tag.position.set((cx + 0.5) * CHUNK * TILE, (cy + 0.5) * CHUNK * TILE)
-                    const t = new Text({ text: `+ Buy land\n${label}`, style: { fontFamily: 'Inter, system-ui, sans-serif', fontSize: 30, fill: 0xe6e9ee, align: 'center', fontWeight: '600', lineHeight: 40 } })
+                    const t = new Text({ text: `+ Expand\n${label}`, style: { fontFamily: 'Inter, system-ui, sans-serif', fontSize: 28, fill: this.pal.tagText, align: 'center', fontWeight: '600', lineHeight: 38 } })
                     t.anchor.set(0.5)
-                    const bg = new Graphics().roundRect(-t.width / 2 - 22, -t.height / 2 - 14, t.width + 44, t.height + 28, 22).fill({ color: 0x0f1115, alpha: 0.72 }).stroke({ width: 2, color: 0x5b6575 })
+                    const hw = t.width / 2 + 22
+                    const hh = t.height / 2 + 14
+                    const bg = new Graphics()
                     tag.addChild(bg, t)
-                    tag.alpha = 0.75
+                    tag.alpha = 0.78
                     tag.label = n
                     tag.cullable = true
                     this.trackText(t)
-                    this.buyTags.push({ key: n, tag, hw: t.width / 2 + 22, hh: t.height / 2 + 14 })
+                    this.buyTags.push({ key: n, tag, bg, text: t, hw, hh })
                     this.buyLayer.addChild(tag)
                 }
             }
+            this.refreshBuyTags()
+        }
+    }
+
+    private refreshBuyTags() {
+        if (!this.buyTags.length || !this.state) return
+        const afford = this.buyCostKey()
+        if (afford === this.buyAfford) return
+        this.buyAfford = afford
+        const stroke = afford ? this.pal.tagStrokeAfford : this.pal.tagStroke
+        const fillText = afford ? this.pal.tagAffordText : this.pal.tagText
+        for (const item of this.buyTags) {
+            item.bg.clear()
+                .roundRect(-item.hw, -item.hh, item.hw * 2, item.hh * 2, 22)
+                .fill({ color: this.pal.tagFill, alpha: this.pal.tagAlpha })
+                .stroke({ width: afford ? 3 : 2, color: stroke })
+            item.text.style.fill = fillText
         }
     }
 
     private buyCostKey(): number {
         const s = this.state!
-        const cost = chunkCost(s.chunks.length - 4)
+        const cost = chunkCost(s.chunks.length - START_CHUNKS.length)
         return canAfford(this.hooks.stock(), cost) ? 1 : 0
     }
 
@@ -795,7 +1041,7 @@ export class GridEngine {
         let minX = Infinity, minY = Infinity, maxX = -Infinity
         for (const k of owned) {
             const [cx, cy] = k.split(',').map(Number) as [number, number]
-            g.rect(cx * CHUNK * TILE, cy * CHUNK * TILE, CHUNK * TILE, CHUNK * TILE).fill(0x22262d)
+            g.rect(cx * CHUNK * TILE, cy * CHUNK * TILE, CHUNK * TILE, CHUNK * TILE).fill(this.pal.otherBg)
             minX = Math.min(minX, cx); minY = Math.min(minY, cy); maxX = Math.max(maxX, cx + 1)
             for (let y = cy * CHUNK; y < (cy + 1) * CHUNK; y++) {
                 for (let x = cx * CHUNK; x < (cx + 1) * CHUNK; x++) {
@@ -829,7 +1075,7 @@ export class GridEngine {
             c.addChild(sp)
         })
         if (Number.isFinite(minX)) {
-            const name = new Text({ text: p.name, style: { fontFamily: 'Inter, system-ui, sans-serif', fontSize: 96, fill: 0xe6e9ee, fontWeight: '700' } })
+            const name = new Text({ text: p.name, style: { fontFamily: 'Inter, system-ui, sans-serif', fontSize: 96, fill: this.pal.otherName, fontWeight: '700' } })
             name.anchor.set(0.5, 1)
             name.position.set((minX + maxX) / 2 * CHUNK * TILE, minY * CHUNK * TILE - 40)
             name.alpha = 0.85
@@ -901,6 +1147,16 @@ export class GridEngine {
     private onDown(ev: PointerEvent) {
         if (!this.state) return
         this.sfx.unlock()
+        if (ev.pointerType === 'touch') {
+            this.touches.set(ev.pointerId, { x: ev.clientX, y: ev.clientY })
+            if (this.touches.size === 2) {
+                this.cancelDrag()
+                const pts = [...this.touches.values()]
+                const dist = Math.max(1, Math.hypot(pts[0]!.x - pts[1]!.x, pts[0]!.y - pts[1]!.y))
+                this.pinch = { dist, cx: (pts[0]!.x + pts[1]!.x) / 2, cy: (pts[0]!.y + pts[1]!.y) / 2 }
+                return
+            }
+        }
         this.updatePointer(ev)
         // A drag whose pointerup got lost is put away before a new one starts.
         if (this.drag) {
@@ -922,10 +1178,26 @@ export class GridEngine {
             this.eraseStep(tx, ty)
             return
         }
+        if (this.tool.mode === 'upgrade') {
+            this.drag = { kind: 'upgrade', last: null, count: 0 }
+            this.upgradeStep(tx, ty)
+            return
+        }
         if (this.tool.mode === 'build') {
             const role = BUILDINGS[this.tool.kind].role
             if (role === 'belt') {
-                this.drag = { kind: 'belt', start: [tx, ty], axis: null, moved: false, path: [{ x: tx, y: ty, r: this.beltAim(tx, ty).r }] }
+                // Starting a belt drag on a machine/miner/splitter begins cleanly at its output port.
+                let sx = tx, sy = ty, sr = this.beltAim(tx, ty).r
+                const hit = this.occ.get(key3(tx, ty, this.layer))
+                if (hit !== undefined) {
+                    const ent = this.state.entities[hit]!
+                    const hrole = BUILDINGS[ent.k].role
+                    if (hrole !== 'belt' && hrole !== 'sink' && hrole !== 'passive') {
+                        const p = outputPorts(ent).find(port => port.l === this.layer)
+                        if (p) { sx = p.x; sy = p.y; sr = p.dir }
+                    }
+                }
+                this.drag = { kind: 'belt', start: [sx, sy], axis: null, moved: false, path: [{ x: sx, y: sy, r: sr }] }
                 this.sfx.beltTick(0)
                 this.drawPath()
                 return
@@ -960,6 +1232,27 @@ export class GridEngine {
 
     private onMove(ev: PointerEvent) {
         if (!this.state) return
+        if (ev.pointerType === 'touch' && this.touches.has(ev.pointerId)) {
+            this.touches.set(ev.pointerId, { x: ev.clientX, y: ev.clientY })
+            if (this.touches.size === 2 && this.pinch) {
+                const pts = [...this.touches.values()]
+                const dist = Math.max(1, Math.hypot(pts[0]!.x - pts[1]!.x, pts[0]!.y - pts[1]!.y))
+                const cx = (pts[0]!.x + pts[1]!.x) / 2
+                const cy = (pts[0]!.y + pts[1]!.y) / 2
+                const ratio = dist / this.pinch.dist
+                const before = this.cam.tz
+                this.cam.tz = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, before * ratio))
+                const r = this.app.canvas.getBoundingClientRect()
+                const mx = cx - r.left - r.width / 2
+                const my = cy - r.top - r.height / 2
+                const wx = this.cam.tx + mx / before
+                const wy = this.cam.ty + my / before
+                this.cam.tx = wx - mx / this.cam.tz - (cx - this.pinch.cx) / this.cam.tz
+                this.cam.ty = wy - my / this.cam.tz - (cy - this.pinch.cy) / this.cam.tz
+                this.pinch = { dist, cx, cy }
+                return
+            }
+        }
         const prevTx = this.pointer.tx
         const prevTy = this.pointer.ty
         this.updatePointer(ev)
@@ -990,6 +1283,10 @@ export class GridEngine {
             if (tileChanged) this.eraseStep(tx, ty)
             return
         }
+        if (d?.kind === 'upgrade') {
+            if (tileChanged) this.upgradeStep(tx, ty)
+            return
+        }
         if (d?.kind === 'belt') {
             if (tileChanged) this.extendBelt(tx, ty)
             return
@@ -1008,6 +1305,10 @@ export class GridEngine {
     }
 
     private onUp(ev: PointerEvent) {
+        if (ev.pointerType === 'touch') {
+            this.touches.delete(ev.pointerId)
+            if (this.touches.size < 2) this.pinch = null
+        }
         const d = this.drag
         if (!d) return
         this.updatePointer(ev)
@@ -1027,7 +1328,7 @@ export class GridEngine {
                 this.commitBelt(d)
                 break
             case 'erase':
-                if (!d.moved && d.count === 0 && this.tool.mode === 'build') this.setTool({ mode: 'select' })
+                if (!d.moved && d.count === 0 && (this.tool.mode === 'build' || this.tool.mode === 'upgrade')) this.setTool({ mode: 'select' })
                 break
         }
         this.refreshHover()
@@ -1096,6 +1397,9 @@ export class GridEngine {
             if (this.selected) return this.act('remove')
             return this.setTool(this.tool.mode === 'remove' ? { mode: 'select' } : { mode: 'remove' })
         }
+        if (k === 'u') {
+            return this.setTool(this.tool.mode === 'upgrade' ? { mode: 'select' } : { mode: 'upgrade' })
+        }
         if (k === 'q') return this.pipette()
         if (k === 'l') {
             const max = this.state?.done.includes('skyway') ? 2 : this.state?.done.includes('bridges') ? 1 : 0
@@ -1107,6 +1411,15 @@ export class GridEngine {
     private pipette() {
         const v = this.hover
         if (!v) {
+            // Pipette on an empty owned ore tile grabs the matching unlocked extractor.
+            const o = this.ore && this.state && this.ownsTile(this.pointer.tx, this.pointer.ty) ? oreAt(this.ore, this.pointer.tx, this.pointer.ty) : null
+            if (o && this.state) {
+                const k: Kind = o === 'oil' ? 'pumpjack' : o === 'crystal' ? 'crystal-drill' : 'miner'
+                if (isUnlocked(k, this.state.done)) {
+                    this.setTool({ mode: 'build', kind: k })
+                    return
+                }
+            }
             if (this.tool.mode !== 'select') this.setTool({ mode: 'select' })
             return
         }
@@ -1161,6 +1474,7 @@ export class GridEngine {
         const flash = new Graphics().rect(cx * CHUNK * TILE, cy * CHUNK * TILE, CHUNK * TILE, CHUNK * TILE).fill(0xffffff)
         this.fx.addChild(flash)
         this.tween(600, (p) => { flash.alpha = 0.35 * (1 - ease.outCubic(p)) }, () => flash.destroy())
+        this.shockwave((cx + 0.5) * CHUNK * TILE, (cy + 0.5) * CHUNK * TILE, CHUNK * TILE * 0.85, this.pal.tagStrokeAfford)
     }
 
     // ---- hover & ghost --------------------------------------------------------------
@@ -1187,15 +1501,41 @@ export class GridEngine {
         }
         const v = this.viewAt(tx, ty)
         this.setHover(v)
+        if (this.tool.mode === 'upgrade') {
+            if (!v) {
+                this.hooks.onHover(null)
+                return
+            }
+            const def = BUILDINGS[v.e.k]
+            const mk = v.e.mk ?? 1
+            const max = maxMk(v.e.k, this.state.done)
+            if (def.role !== 'belt' && def.role !== 'machine' && def.role !== 'source') {
+                this.hooks.onHover({ x: this.pointer.sx, y: this.pointer.sy, title: def.name, lines: ['Cannot upgrade'] })
+                return
+            }
+            if (mk >= max) {
+                this.hooks.onHover({ x: this.pointer.sx, y: this.pointer.sy, title: `${def.name} Mk${mk}`, lines: ['Max Mk for research'] })
+                return
+            }
+            const cost = upgradeCost(v.e.k, mk + 1)
+            const ok = canAfford(this.hooks.stock(), cost)
+            this.hooks.onHover({
+                x: this.pointer.sx, y: this.pointer.sy,
+                title: `${def.name} Mk${mk} → Mk${mk + 1}`,
+                lines: [costLine(cost)],
+                error: ok ? undefined : ERROR_TEXT.afford
+            })
+            return
+        }
         if (v) {
             const def = BUILDINGS[v.e.k]
             const lines: string[] = []
             const rec = recipeOf(v.e)
-            if (rec) lines.push(`Makes ${ITEMS[RECIPES[rec]!.out].name.toLowerCase()}`)
+            if (rec) lines.push(`${ITEMS[RECIPES[rec]!.out].name}`)
             if (v.sol >= 0 && this.sol) {
                 const f = this.sol.flow[v.sol]!
-                if (def.role === 'machine' || def.role === 'source') lines.push(`${Math.round(this.sol.busy[v.sol]! * 100)}% busy`)
-                else if (f > 0) lines.push(`${fmt(f * 60)}/min`)
+                if (def.role === 'machine' || def.role === 'source') lines.push(`${Math.round(this.sol.busy[v.sol]! * 100)}% active`)
+                else if (f > 0) lines.push(`${fmt(f * 60)}/m`)
             }
             if ((v.e.mk ?? 1) > 1) lines.push(`Mk${v.e.mk}`)
             this.hooks.onHover({ x: this.pointer.sx, y: this.pointer.sy, title: def.name, lines })
@@ -1204,7 +1544,7 @@ export class GridEngine {
         const o = this.ore && oreAt(this.ore, tx, ty)
         if (o && this.ownsTile(tx, ty) && this.tool.mode === 'select') {
             const canMine = o !== 'oil' && o !== 'crystal'
-            this.hooks.onHover({ x: this.pointer.sx, y: this.pointer.sy, title: ITEMS[o].name, lines: [canMine ? 'Click to mine by hand' : 'Needs a special extractor'] })
+            this.hooks.onHover({ x: this.pointer.sx, y: this.pointer.sy, title: ITEMS[o].name, lines: [canMine ? 'Hold to mine · Q builds miner' : 'Q selects extractor'] })
             return
         }
         this.hooks.onHover(null)
@@ -1339,7 +1679,7 @@ export class GridEngine {
                 .roundRect(-w * TILE / 2 + 1, -h * TILE / 2 + 1, w * TILE - 2, h * TILE - 2, 10)
                 .fill({ color: edge, alpha: same ? 0.04 : ok ? 0.12 : 0.2 })
                 .stroke({ width: this.lineWidth(3, 2), color: edge, alpha: same ? 0.35 : 0.9 })
-            // Direction arrow beyond the output edge.
+            // Direction arrows: emerald output arrow + sky-blue input chevrons on multi-tile machines.
             this.ghostArrow.clear()
             if (arrow) {
                 const D = DIRS[e.r]!
@@ -1347,10 +1687,20 @@ export class GridEngine {
                 const ax = (outs[0]! + 0.5 + D[0] * 0.75 - w / 2) * TILE
                 const ay = (outs[1]! + 0.5 + D[1] * 0.75 - h / 2) * TILE
                 const ang = e.r * Math.PI / 2
-                const p = (dx: number, dy: number) => [ax + dx * Math.cos(ang) - dy * Math.sin(ang), ay + dx * Math.sin(ang) + dy * Math.cos(ang)] as const
-                const a = p(-8, -12), b = p(8, 0), c = p(-8, 12)
+                const p = (ox: number, oy: number, dx: number, dy: number) => [ox + dx * Math.cos(ang) - dy * Math.sin(ang), oy + dx * Math.sin(ang) + dy * Math.cos(ang)] as const
+                const a = p(ax, ay, -8, -12), b = p(ax, ay, 8, 0), c = p(ax, ay, -8, 12)
                 this.ghostArrow.moveTo(a[0], a[1]).lineTo(b[0], b[1]).lineTo(c[0], c[1])
-                    .stroke({ width: this.lineWidth(5, 2.5), color: ok ? 0x4ade80 : 0xf87171, cap: 'round', join: 'round' })
+                    .stroke({ width: this.lineWidth(5, 2.5), color: ok ? 0x34d399 : 0xf87171, cap: 'round', join: 'round' })
+                if (def.role === 'machine' && def.h > 1) {
+                    for (let row = 0; row < def.h; row++) {
+                        const ins = localToWorld(e.k, e.r, 0, row)
+                        const ix = (ins[0]! + 0.5 - D[0] * 0.72 - w / 2) * TILE
+                        const iy = (ins[1]! + 0.5 - D[1] * 0.72 - h / 2) * TILE
+                        const ia = p(ix, iy, -6, -9), ib = p(ix, iy, 6, 0), ic = p(ix, iy, -6, 9)
+                        this.ghostArrow.moveTo(ia[0], ia[1]).lineTo(ib[0], ib[1]).lineTo(ic[0], ic[1])
+                            .stroke({ width: this.lineWidth(4, 2), color: 0x38bdf8, cap: 'round', join: 'round' })
+                    }
+                }
             }
         }
         const layerDim = this.layer > 0 && (def.role === 'belt' || def.role === 'ramp')
@@ -1560,6 +1910,45 @@ export class GridEngine {
             setTimeout(() => this.sfx.beltLand(idx), delay)
         })
         if (errs.some(e => e === 'afford')) setTimeout(() => this.sfx.invalid(), n * 16 + 60)
+    }
+
+    private upgradeStep(tx: number, ty: number) {
+        const d = this.drag
+        if (d?.kind !== 'upgrade') return
+        const pts = d.last ? line(d.last[0], d.last[1], tx, ty) : [[tx, ty] as [number, number]]
+        const first = !d.last
+        d.last = [tx, ty]
+        for (const [x, y] of pts) {
+            const v = this.viewAt(x, y)
+            if (!v) continue
+            if (this.upgradeAt(v.e.x, v.e.y, layersOf(v.e)[0]!, d.count, first)) d.count++
+        }
+    }
+
+    private upgradeAt(x: number, y: number, l: number, step: number, reportErr: boolean): boolean {
+        const s = this.state
+        if (!s) return false
+        const i = this.occ.get(key3(x, y, l))
+        if (i === undefined) return false
+        const e = s.entities[i]!
+        const def = BUILDINGS[e.k]
+        if (def.role !== 'belt' && def.role !== 'machine' && def.role !== 'source') return false
+        const to = (e.mk ?? 1) + 1
+        if (to > maxMk(e.k, s.done)) return false
+        const [err] = this.hooks.commit([{ op: 'upgrade', x: e.x, y: e.y, l }])
+        if (err) {
+            if (reportErr) this.reject(e.x, e.y, err)
+            return false
+        }
+        this.sfx.upgrade(step)
+        const nv = this.views.get(keyOf(e))
+        if (nv) {
+            const [cx, cy] = this.centerOf(e)
+            this.shockwave(cx, cy, TILE * 0.9, 0xfbbf24)
+            this.burst(nv, 0xffd34d, def.role === 'belt' ? 5 : 10)
+            if (def.role !== 'belt') this.floatText(cx, cy - 18, `Mk${to}`, 0xfde047, 22)
+        }
+        return true
     }
 
     private eraseStep(tx: number, ty: number) {
@@ -1835,6 +2224,7 @@ export class GridEngine {
     }
 
     private spawnParticle(x: number, y: number, color: number, vx: number, vy: number, life: number, sizePx: number, grav = 600) {
+        if (this.particles.length >= MAX_PARTICLES) return
         const s = new Sprite(Texture.WHITE)
         s.anchor.set(0.5)
         s.tint = color
@@ -1842,6 +2232,19 @@ export class GridEngine {
         s.position.set(x, y)
         this.fx.addChild(s)
         this.particles.push({ s, vx, vy, life, max: life, grav, spin: (Math.random() - 0.5) * 12 })
+    }
+
+    private shockwave(x: number, y: number, maxRadius: number, color: number) {
+        const ring = new Graphics()
+        ring.circle(0, 0, maxRadius).stroke({ width: Math.max(3, 2 / this.cam.zoom), color, alpha: 0.9 })
+        ring.position.set(x, y)
+        ring.scale.set(0.25)
+        this.fx.addChild(ring)
+        this.tween(320, (p) => {
+            const q = ease.outCubic(p)
+            ring.scale.set(0.25 + 0.75 * q)
+            ring.alpha = 0.75 * (1 - p)
+        }, () => ring.destroy())
     }
 
     private dust(v: EntView, n: number) {
@@ -1855,7 +2258,7 @@ export class GridEngine {
             const ey = side >= 2 ? (side === 3 ? 1 : -1) * h * TILE / 2 : t * h * TILE
             const len = Math.hypot(ex, ey) || 1
             const sp = 90 + Math.random() * 90
-            this.spawnParticle(cx + ex, cy + ey, 0xc9cfd8, ex / len * sp, ey / len * sp, 0.35 + Math.random() * 0.2, 6 + Math.random() * 6, 0)
+            this.spawnParticle(cx + ex, cy + ey, this.pal.dust, ex / len * sp, ey / len * sp, 0.35 + Math.random() * 0.2, 6 + Math.random() * 6, 0)
         }
     }
 
@@ -1869,7 +2272,7 @@ export class GridEngine {
     }
 
     private floatText(x: number, y: number, text: string, color: number, sizePx: number) {
-        const t = new Text({ text, style: { fontFamily: 'Inter, system-ui, sans-serif', fontSize: sizePx, fill: color, fontWeight: '700', stroke: { color: 0x0f1115, width: 5 } } })
+        const t = new Text({ text, style: { fontFamily: 'Inter, system-ui, sans-serif', fontSize: sizePx, fill: color, fontWeight: '700', stroke: { color: this.pal.textStroke, width: 5 } } })
         t.anchor.set(0.5)
         t.position.set(x, y)
         t.scale.set(1 / Math.max(0.5, this.cam.zoom))
@@ -1886,7 +2289,7 @@ export class GridEngine {
         const icon = new Sprite(this.tex.item[item])
         icon.anchor.set(0.5)
         icon.width = icon.height = 30
-        const t = new Text({ text, style: { fontFamily: 'Inter, system-ui, sans-serif', fontSize: 24, fill: 0xffffff, fontWeight: '800', stroke: { color: 0x0f1115, width: 5 } } })
+        const t = new Text({ text, style: { fontFamily: 'Inter, system-ui, sans-serif', fontSize: 24, fill: this.theme === 'light' ? 0x0f172a : 0xffffff, fontWeight: '800', stroke: { color: this.pal.textStroke, width: 5 } } })
         t.anchor.set(0, 0.5)
         t.x = 18
         c.addChild(icon, t)
@@ -1906,6 +2309,7 @@ export class GridEngine {
         for (let l = 0; l < 3; l++) {
             const a = !building ? 1 : l === this.layer ? 1 : l < this.layer ? 0.55 : 0.3
             this.beltLayers[l]!.alpha = a
+            this.shadowLayers[l]!.alpha = a
             this.itemLayers[l]!.alpha = a
             if (l > 0) this.entLayers[l]!.alpha = a
         }
@@ -1967,6 +2371,22 @@ export class GridEngine {
         this.world.scale.set(c.zoom)
         this.drawGrid()
         this.world.position.set(w / 2 - c.x * c.zoom, h / 2 - c.y * c.zoom)
+        // Compute expanded viewport in tile coordinates for O(visible) culling.
+        const vw = w / c.zoom
+        const vh = h / c.zoom
+        const x0 = (c.x - vw / 2) / TILE - 2
+        const x1 = (c.x + vw / 2) / TILE + 2
+        const y0 = (c.y - vh / 2) / TILE - 2
+        const y1 = (c.y + vh / 2) / TILE + 2
+        this.viewBounds = { x0, y0, x1, y1 }
+        const minCx = Math.floor(x0 / CHUNK) - 1
+        const maxCx = Math.floor(x1 / CHUNK) + 1
+        const minCy = Math.floor(y0 / CHUNK) - 1
+        const maxCy = Math.floor(y1 / CHUNK) + 1
+        for (let i = 0; i < this.oreChunks.length; i++) {
+            const ch = this.oreChunks[i]!
+            ch.c.visible = ch.cx >= minCx && ch.cx <= maxCx && ch.cy >= minCy && ch.cy <= maxCy
+        }
         // Keep the pointer's world position fresh while the camera glides.
         if (this.pointer.inside) {
             const [wx, wy] = this.screenToWorld(this.pointer.sx, this.pointer.sy)
@@ -1979,17 +2399,19 @@ export class GridEngine {
                 this.pointer.ty = ty
                 if (this.drag?.kind === 'belt') this.extendBelt(tx, ty)
                 else if (this.drag?.kind === 'paint') this.paintStep()
+                else if (this.drag?.kind === 'upgrade') this.upgradeStep(tx, ty)
                 else if (!this.drag) this.refreshHover()
             }
         }
         this.syncTextResolution()
+        this.refreshBuyTags()
         // Buy tags brighten under the cursor.
         const hotKey = this.tool.mode === 'select' && this.pointer.inside && this.buyTags.length ? this.buyTagAt(this.pointer.wx, this.pointer.wy) : null
         for (const { key, tag } of this.buyTags) {
             const hot = key === hotKey
-            const target = hot ? 1 : 0.7
+            const target = hot ? 1 : (this.buyAfford ? 0.92 : 0.65)
             tag.alpha += (target - tag.alpha) * 0.2
-            const s = hot ? 1.06 : 1
+            const s = hot ? 1.07 : 1
             tag.scale.set(tag.scale.x + (s - tag.scale.x) * 0.2)
         }
     }
@@ -2027,13 +2449,17 @@ export class GridEngine {
     }
 
     private updateBelts() {
-        // Every belt of a Mk shares a frame: swap textures only when it advances.
+        // Every belt of a Mk shares a frame: swap textures only when it advances, culled to viewport.
         const frames = BELT_MK.map(m => beltFrameAt(this.time, m.speed))
         const key = frames.join(',')
         if (key === this.beltFrame) return
         this.beltFrame = key
-        for (const v of this.belts) {
-            const mk = Math.min(4, v.e.mk ?? 1) - 1
+        const { x0, y0, x1, y1 } = this.viewBounds
+        for (let idx = 0; idx < this.belts.length; idx++) {
+            const v = this.belts[idx]!
+            const e = v.e
+            if (e.x < x0 || e.x > x1 || e.y < y0 || e.y > y1) continue
+            const mk = Math.min(4, e.mk ?? 1) - 1
             // Belts with nothing on them rest; moving ones run.
             const moving = !this.sol || v.sol < 0 || this.sol.flow[v.sol]! > 0.001
             const f = moving ? frames[mk]! : 0
@@ -2043,10 +2469,12 @@ export class GridEngine {
     }
 
     private updateLabBars(dt: number) {
+        if (!this.labs.length) return
         const target = this.research
         if (target !== null) this.researchShown += (target - this.researchShown) * (1 - Math.exp(-dt * 4))
         const frac = target === null ? -1 : Math.round(this.researchShown * 200) / 200
-        for (const v of this.views.values()) {
+        for (let idx = 0; idx < this.labs.length; idx++) {
+            const v = this.labs[idx]!
             if (!v.bar || v.barAt === frac) continue
             v.barAt = frac
             const g = v.bar.clear()
@@ -2062,20 +2490,53 @@ export class GridEngine {
 
     private updateMachines(dt: number) {
         if (!this.sol) return
-        for (const v of this.views.values()) {
+        const { x0, y0, x1, y1 } = this.viewBounds
+        const now = performance.now()
+        this.emberClock += dt
+        const emitEmber = this.emberClock >= 0.14 && this.cam.zoom > 0.35 && this.particles.length < MAX_PARTICLES - 20
+        if (emitEmber) this.emberClock = 0
+        for (let idx = 0; idx < this.machines.length; idx++) {
+            const v = this.machines[idx]!
             if (v.lifted) continue
-            const role = BUILDINGS[v.e.k].role
-            if (role !== 'machine' && role !== 'source' && role !== 'sink') continue
+            const e = v.e
+            if (e.x + 3 < x0 || e.x > x1 || e.y + 3 < y0 || e.y > y1) continue
+            const role = BUILDINGS[e.k].role
             const i = v.sol
             const target = i >= 0 ? (role === 'sink' ? Math.min(1, this.sol.flow[i]!) : this.sol.busy[i]!) : 0
             v.busy += (target - v.busy) * (1 - Math.exp(-dt * 3))
-            if (v.spin) v.spin.rotation += dt * 7 * v.busy
+            if (v.spin) v.spin.rotation += dt * 7.5 * v.busy
             if (role === 'machine' || role === 'sink') {
-                const pulse = 1 + 0.025 * v.busy * Math.sin(this.time * (role === 'sink' ? 5 : 9) + v.phase)
-                if ((v.animUntil ?? 0) < performance.now()) v.root.scale.set(pulse)
+                const pulse = 1 + 0.024 * v.busy * Math.sin(this.time * (role === 'sink' ? 5 : 9) + v.phase)
+                if ((v.animUntil ?? 0) < now) v.root.scale.set(pulse)
+            }
+            if (v.glow) {
+                const wave = 0.72 + 0.28 * Math.sin(this.time * 4.5 + v.phase)
+                v.glow.alpha = v.busy > 0.05 ? v.busy * (this.theme === 'light' ? 0.22 : 0.42) * wave : 0
+            }
+            if (v.led) {
+                v.led.tint = v.busy > 0.08 ? 0x34d399 : 0xf59e0b
+                v.led.alpha = v.busy > 0.08 ? 0.95 : 0.45 + 0.35 * Math.sin(this.time * 3 + v.phase)
             }
             const idle = role !== 'sink' && v.busy < 0.05
-            v.body.tint = idle ? 0xb8bec8 : 0xffffff
+            v.body.tint = idle ? (this.theme === 'light' ? 0xd4dae4 : 0xb8bec8) : 0xffffff
+            // Occasional subtle ambient sparks from active furnaces, reactors and labs.
+            if (emitEmber && v.busy > 0.2 && Math.random() < 0.09) {
+                const k = e.k
+                if (k === 'smelter' || k === 'kiln' || k === 'reactor' || k === 'lab') {
+                    const [cx, cy] = this.centerOf(e)
+                    const col = k === 'lab' ? 0xc4b5fd : k === 'reactor' ? 0xe879f9 : 0xfb923c
+                    this.spawnParticle(
+                        cx + (Math.random() - 0.5) * 26,
+                        cy + (Math.random() - 0.5) * 18,
+                        col,
+                        (Math.random() - 0.5) * 24,
+                        -38 - Math.random() * 34,
+                        0.45 + Math.random() * 0.25,
+                        3.5 + Math.random() * 2.5,
+                        -12
+                    )
+                }
+            }
         }
     }
 
@@ -2083,16 +2544,12 @@ export class GridEngine {
         const used = [0, 0, 0]
         const sol = this.sol
         if (sol) {
-            const w = this.app.screen.width / this.cam.zoom
-            const h = this.app.screen.height / this.cam.zoom
-            const x0 = (this.cam.x - w / 2) / TILE - 1
-            const x1 = (this.cam.x + w / 2) / TILE + 1
-            const y0 = (this.cam.y - h / 2) / TILE - 1
-            const y1 = (this.cam.y + h / 2) / TILE + 1
+            const { x0, y0, x1, y1 } = this.viewBounds
             const showItems = this.cam.zoom > 0.22
-            const NI = 18
+            const showShadows = this.cam.zoom > 0.42
             if (showItems) {
-                for (const v of this.belts) {
+                for (let idx = 0; idx < this.belts.length; idx++) {
+                    const v = this.belts[idx]!
                     const e = v.e
                     if (e.x < x0 || e.x > x1 || e.y < y0 || e.y > y1 || v.sol < 0 || v.lifted) continue
                     const flow = sol.flow[v.sol]!
@@ -2100,6 +2557,8 @@ export class GridEngine {
                     // A belt whose destination won't take more backs up: it fills and slows to what drains.
                     const jammed = fill > 0.5
                     if (flow < 0.01 && !jammed) continue
+                    const dist = this.solMixDist[v.sol] ?? (jammed ? this.solHeldDist[v.sol] : null)
+                    if (!dist) continue
                     const mk = BELT_MK[Math.min(4, e.mk ?? 1) - 1]!
                     const speed = mk.speed
                     // Items spaced by how many sit on a tile: what arrives per tile of travel, or a full jam.
@@ -2109,52 +2568,95 @@ export class GridEngine {
                     const s0 = v.chain ?? 0
                     const firstK = Math.ceil((s0 - head) / spacing)
                     const l = e.l ?? 0
+                    const layer = this.itemLayers[l]!
+                    const shadowLayer = this.shadowLayers[l]!
+                    const pool = this.itemPool[l]!
+                    const shadows = this.shadowPool[l]!
                     for (let k = firstK; ; k++) {
                         const s = head + k * spacing
                         const p = s - s0
                         if (p >= 1) break
                         if (p < 0) continue
-                        let item = this.pickItem(sol.mix, v.sol * NI, k)
-                        if (item < 0 && sol.held) item = this.pickItem(sol.held, v.sol * NI, k)
+                        const item = pickDist(dist, k)
                         if (item < 0) continue
-                        let sp = this.itemPool[l]![used[l]!]
+                        const slot = used[l]!
+                        let sp = pool[slot]
+                        let sh = shadows[slot]
                         if (!sp) {
+                            sh = new Sprite(this.tex.shadow)
+                            sh.anchor.set(0.5)
+                            sh.width = sh.height = 26
+                            shadowLayer.addChild(sh)
+                            shadows.push(sh)
                             sp = new Sprite()
                             sp.anchor.set(0.5)
-                            this.itemLayers[l]!.addChild(sp)
-                            this.itemPool[l]!.push(sp)
+                            sp.width = sp.height = 26
+                            layer.addChild(sp)
+                            pool.push(sp)
                         }
-                        used[l]!++
-                        sp.visible = true
-                        sp.texture = this.tex.item[ITEM_ORDER[item]!]
-                        sp.width = sp.height = 26
+                        used[l] = slot + 1
                         const [px, py] = beltPoint(v.shape ?? 'straight', e.r, p)
-                        sp.position.set((e.x + 0.5) * TILE + px, (e.y + 0.5) * TILE + py)
+                        const wx = (e.x + 0.5) * TILE + px
+                        const wy = (e.y + 0.5) * TILE + py
+                        if (sh) {
+                            sh.visible = showShadows
+                            if (showShadows) sh.position.set(wx + 1.5, wy + 4)
+                        }
+                        sp.visible = true
+                        const tex = this.tex.item[ITEM_ORDER[item]!]
+                        if (sp.texture !== tex) sp.texture = tex
+                        sp.position.set(wx, wy)
                     }
                 }
             }
         }
         for (let l = 0; l < 3; l++) {
             const pool = this.itemPool[l]!
+            const shadows = this.shadowPool[l]!
             for (let i = used[l]!; i < pool.length; i++) {
                 if (!pool[i]!.visible) break
                 pool[i]!.visible = false
+                if (shadows[i]) shadows[i]!.visible = false
             }
         }
     }
 
-    private pickItem(mix: Float32Array, base: number, k: number): number {
-        let total = 0
-        for (let i = 0; i < 18; i++) total += mix[base + i]!
-        if (total <= 0) return -1
-        // Deterministic per item slot, so an item keeps its kind as it travels.
-        const h = (((k * 2654435761) >>> 0) % 10000) / 10000
-        let acc = 0
-        for (let i = 0; i < 18; i++) {
-            acc += mix[base + i]! / total
-            if (h < acc) return i
+    private drawPorts(e: Entity, alpha = 0.85) {
+        const def = BUILDINGS[e.k]
+        if (def.role === 'belt' || def.role === 'sink' || def.role === 'passive') return
+        const o = this.overlay
+        const D = DIRS[e.r]!
+        const ang = e.r * Math.PI / 2
+        const chevron = (cx: number, cy: number, color: number, a: number) => {
+            const c = Math.cos(a), sn = Math.sin(a)
+            const p = (dx: number, dy: number) => [cx + dx * c - dy * sn, cy + dx * sn + dy * c] as const
+            const p1 = p(-6, -9), p2 = p(6, 0), p3 = p(-6, 9)
+            o.moveTo(p1[0], p1[1]).lineTo(p2[0], p2[1]).lineTo(p3[0], p3[1])
+                .stroke({ width: this.lineWidth(4, 2), color, alpha, cap: 'round', join: 'round' })
         }
-        return -1
+        for (const port of outputPorts(e)) {
+            const px = (port.x + 0.5 - DIRS[port.dir]![0]! * 0.25) * TILE
+            const py = (port.y + 0.5 - DIRS[port.dir]![1]! * 0.25) * TILE
+            chevron(px, py, 0x34d399, port.dir * Math.PI / 2)
+        }
+        if (def.role === 'machine' && def.h > 1) {
+            for (let row = 0; row < def.h; row++) {
+                const [ox, oy] = localToWorld(e.k, e.r, 0, row)
+                const ix = (e.x + ox + 0.5 - D[0] * 0.72) * TILE
+                const iy = (e.y + oy + 0.5 - D[1] * 0.72) * TILE
+                chevron(ix, iy, 0x38bdf8, ang)
+            }
+        }
+    }
+
+    private drawAmplifierReach(e: Entity) {
+        if (e.k !== 'amplifier') return
+        const o = this.overlay
+        for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
+            o.roundRect((e.x + dx) * TILE + 4, (e.y + dy) * TILE + 4, TILE - 8, TILE - 8, 10)
+                .fill({ color: 0x34d399, alpha: 0.14 })
+                .stroke({ width: this.lineWidth(2.5, 1.5), color: 0x34d399, alpha: 0.65 })
+        }
     }
 
     private drawHighlights() {
@@ -2163,18 +2665,81 @@ export class GridEngine {
             const [w, h] = size(v.e.k, v.e.r)
             o.roundRect(v.e.x * TILE + 1, v.e.y * TILE + 1, w * TILE - 2, h * TILE - 2, 11).stroke({ width: this.lineWidth(width, width * 0.6), color, alpha })
         }
+        if (this.tool.mode === 'build' && this.tool.kind === 'amplifier' && this.pointer.inside) {
+            const g = this.ghostEntity()
+            if (g) this.drawAmplifierReach(g)
+        }
         if (this.hover && !this.hover.lifted && this.tool.mode !== 'build') {
             const erase = this.tool.mode === 'remove' || this.drag?.kind === 'erase'
-            box(this.hover, erase ? 0xf87171 : 0xffffff, 0.55 + 0.25 * Math.sin(this.time * 6), 3)
+            const upg = this.tool.mode === 'upgrade' || this.drag?.kind === 'upgrade'
+            const col = erase ? 0xf87171 : upg ? 0xfbbf24 : this.pal.hover
+            box(this.hover, col, 0.55 + 0.25 * Math.sin(this.time * 6), upg ? 4 : 3)
+            if (!erase && !upg) {
+                this.drawPorts(this.hover.e, 0.75)
+                this.drawAmplifierReach(this.hover.e)
+            }
         }
-        if (this.selected && !this.selected.lifted) box(this.selected, 0x60a5fa, 0.95, 4)
+        if (this.selected && !this.selected.lifted) {
+            box(this.selected, 0x38bdf8, 0.95, 4)
+            this.drawPorts(this.selected.e, 0.9)
+            this.drawAmplifierReach(this.selected.e)
+        }
         if (this.tool.mode === 'remove' && this.pointer.inside && !this.hover) {
             o.roundRect(this.pointer.tx * TILE + 4, this.pointer.ty * TILE + 4, TILE - 8, TILE - 8, 8).stroke({ width: this.lineWidth(2, 1.5), color: 0xf87171, alpha: 0.5 })
+        }
+        if (this.tool.mode === 'upgrade' && this.pointer.inside && !this.hover) {
+            o.roundRect(this.pointer.tx * TILE + 4, this.pointer.ty * TILE + 4, TILE - 8, TILE - 8, 8).stroke({ width: this.lineWidth(2, 1.5), color: 0xfbbf24, alpha: 0.55 })
         }
     }
 }
 
 const ITEM_ORDER = ITEM_IDS
+
+/** Precomputes compact per-entity item distributions once per solve so frame rendering stays O(1). */
+function buildDists(arr: Float32Array, count: number): (ItemDist | null)[] {
+    const NI = ITEM_ORDER.length
+    const out: (ItemDist | null)[] = new Array(count).fill(null)
+    for (let i = 0; i < count; i++) {
+        const base = i * NI
+        let total = 0
+        let first = -1
+        let kinds = 0
+        for (let it = 0; it < NI; it++) {
+            const v = arr[base + it]!
+            if (v > 1e-6) {
+                total += v
+                if (first < 0) first = it
+                kinds++
+            }
+        }
+        if (kinds === 0) continue
+        if (kinds === 1) {
+            out[i] = { single: first, ids: [], cdf: [] }
+            continue
+        }
+        const ids: number[] = []
+        const cdf: number[] = []
+        let acc = 0
+        for (let it = 0; it < NI; it++) {
+            const v = arr[base + it]!
+            if (v <= 1e-6) continue
+            acc += v / total
+            ids.push(it)
+            cdf.push(acc)
+        }
+        out[i] = { single: -1, ids, cdf }
+    }
+    return out
+}
+
+function pickDist(dist: ItemDist, k: number): number {
+    if (dist.single >= 0) return dist.single
+    const h = (((k * 2654435761) >>> 0) % 10000) / 10000
+    for (let i = 0; i < dist.cdf.length; i++) {
+        if (h < dist.cdf[i]!) return dist.ids[i]!
+    }
+    return dist.ids[dist.ids.length - 1] ?? -1
+}
 
 /** A point along a belt tile at progress p (0..1), relative to the tile centre. */
 function beltPoint(shape: BeltShape, r: Dir, p: number): [number, number] {

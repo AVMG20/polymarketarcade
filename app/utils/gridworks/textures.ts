@@ -22,6 +22,10 @@ export interface GridTextures {
     ore: Record<OreId, Texture[]>
     /** belt[mk - 1][shape][frame] */
     belt: Record<BeltShape, Texture[]>[]
+    /** Soft drop shadow for items riding belts. */
+    shadow: Texture
+    /** Soft radial glow for active machines and effects. */
+    glow: Texture
     white: Texture
 }
 
@@ -180,5 +184,17 @@ export async function loadTextures(renderer: Renderer, cancelled: () => boolean 
         }
         belt.push(set)
     }
-    return { building, spin, item, ore, belt, white: Texture.WHITE }
+    const shadowG = new Graphics()
+    shadowG.ellipse(16, 18, 12, 9).fill({ color: 0x000000, alpha: 0.34 })
+    const shadow = renderer.generateTexture({ target: shadowG, frame: new Rectangle(0, 0, 32, 32), resolution: 2, antialias: true })
+    shadowG.destroy()
+
+    const glowG = new Graphics()
+    glowG.circle(32, 32, 28).fill({ color: 0xffffff, alpha: 0.14 })
+    glowG.circle(32, 32, 18).fill({ color: 0xffffff, alpha: 0.24 })
+    glowG.circle(32, 32, 9).fill({ color: 0xffffff, alpha: 0.45 })
+    const glow = renderer.generateTexture({ target: glowG, frame: new Rectangle(0, 0, 64, 64), resolution: 2, antialias: true })
+    glowG.destroy()
+
+    return { building, spin, item, ore, belt, shadow, glow, white: Texture.WHITE }
 }
