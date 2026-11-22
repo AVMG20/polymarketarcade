@@ -62,6 +62,17 @@ describe('gridworks layout', () => {
         expect(accepts({ k: 'mixer', x: 10, y: 10, r: 0 }, 10, 10, 0, 1)).toBeNull()
     })
 
+    it('storage and labs take items from every side, whatever their rotation', () => {
+        for (const k of ['storage', 'lab'] as const) {
+            for (const r of [0, 1, 2, 3] as const) {
+                for (const dir of [0, 1, 2, 3] as const) {
+                    expect(accepts({ k, x: 10, y: 10, r }, 10, 10, 0, dir)).toBe('behind')
+                }
+                expect(accepts({ k, x: 10, y: 10, r }, 10, 10, 1, 0)).toBeNull()
+            }
+        }
+    })
+
     it('rotates multi-tile footprints so the input edge faces the flow', () => {
         // A 1×2 mixer facing south: its two input tiles sit side by side on the top row.
         expect(localToWorld('mixer', 1, 0, 0)).toEqual([1, 0])

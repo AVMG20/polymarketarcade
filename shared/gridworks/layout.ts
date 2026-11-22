@@ -106,6 +106,8 @@ export type Accept = 'behind' | 'side' | null
 export function accepts(e: Entity, x: number, y: number, l: number, dir: Dir): Accept {
     const role = BUILDINGS[e.k].role
     const el = e.l ?? 0
+    // Storage and labs have no output, so they take items from every side.
+    if (role === 'sink') return l === 0 ? 'behind' : null
     if (dir === rot(e.r, 2)) return null
     switch (role) {
         case 'belt':
@@ -134,8 +136,6 @@ export function accepts(e: Entity, x: number, y: number, l: number, dir: Dir): A
             const inside = (px: number, py: number) => px >= e.x && py >= e.y && px < e.x + w && py < e.y + h
             return inside(x, y) && !inside(bx, by) ? 'behind' : null
         }
-        case 'sink':
-            return l === 0 ? 'behind' : null
         default:
             return null
     }
