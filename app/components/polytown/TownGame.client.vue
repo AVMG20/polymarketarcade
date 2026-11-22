@@ -3420,7 +3420,8 @@ function hex(color: number) { return `#${color.toString(16).padStart(6, '0')}` }
     --g-text-2: rgba(31, 28, 22, 0.70);
     --g-muted: rgba(31, 28, 22, 0.50);
     /* semantic */
-    --g-accent: var(--ui-primary);
+    /* The old site's Nuxt UI primary: green-500, green-400 in the dark. */
+    --g-accent: oklch(72.3% 0.219 149.579);
     --g-accent-fg: #fff;
     --g-gold: #a8730c;
     --g-gold-bg: rgba(212, 160, 23, 0.14);
@@ -3460,6 +3461,7 @@ function hex(color: number) { return `#${color.toString(16).padStart(6, '0')}` }
     --g-text: #f1eee7;
     --g-text-2: rgba(241, 238, 231, 0.70);
     --g-muted: rgba(241, 238, 231, 0.50);
+    --g-accent: oklch(79.2% 0.209 151.711);
     --g-accent-fg: #0b1a10;
     --g-gold: #f0c257;
     --g-gold-bg: rgba(240, 194, 87, 0.16);
