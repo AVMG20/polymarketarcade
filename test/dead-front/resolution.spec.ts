@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { dfAdaptivePixelRatio, dfNewPrGovernor, dfPixelRatioBounds, dfPrStrained, dfStepPrGovernor } from '../../app/utils/dead-front/engine/resolution'
+import { dfAdaptivePixelRatio, dfNewPrGovernor, dfPixelRatioBounds, dfPrStrained, dfStepPrGovernor, dfTierTooHeavy } from '../../app/utils/dead-front/engine/resolution'
 
 // CLAUDE.md: never render below native resolution on a dpr 1 screen.
 
@@ -101,6 +101,12 @@ describe('pixel ratio policy', () => {
             run(g, clock, 15, 30)
             expect(g.pr).toBe(b.min)
             expect(dfPrStrained(g)).toBe(true)
+        })
+
+        it('falls back only when the GPU probe runs long, not under a 30 fps frame-rate cap', () => {
+            // capped: frames come every 33 ms but take 9 ms of GPU each
+            expect(dfTierTooHeavy(9)).toBe(false)
+            expect(dfTierTooHeavy(24)).toBe(true)
         })
 
         it('does not climb into a level that keeps missing frames', () => {

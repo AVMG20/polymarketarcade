@@ -190,6 +190,19 @@ export function dfPrStrained(g: DfPrGovernor): boolean {
     return g.strain >= STRAIN_S
 }
 
+/**
+ * GPU time per frame (ms, frames drawn back to back without waiting for vsync) above which the
+ * full tier is too heavy at the lowest ratio. A frame-rate cap (a browser's battery saver holding
+ * requestAnimationFrame at 30 fps) strains the governor just the same, yet probes far under this.
+ * Below 16.7 ms to leave the frame's own work room.
+ */
+const PROBE_BUDGET_MS = 14
+
+/** The probe confirms the strain: the GPU, not a frame-rate cap, is what runs long. */
+export function dfTierTooHeavy(probeMs: number): boolean {
+    return probeMs > PROBE_BUDGET_MS
+}
+
 /** Storage key for the tier 'auto' fell back to on this screen (density and size bucket). */
 export function dfTierMemoryKey(dpr: number, width: number, height: number): string {
     const area = Math.round((width * height) / 250000)
