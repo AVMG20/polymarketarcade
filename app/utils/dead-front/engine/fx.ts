@@ -1,6 +1,7 @@
 import * as THREE from 'three'
 import type { Vec3 } from '#shared/dead-front/types'
 import type { DfFx, DfFxOpts, DfFxPreset } from '../context'
+import { dfFlashSlot, dfHoldSlot } from './light-pool'
 
 // The Dead Front particle / tracer / lightning / decal / light-flash system.
 // Everything is pooled and preallocated: bursts write into fixed typed arrays,
@@ -1048,24 +1049,8 @@ export function createDfFx(scene: THREE.Scene, camera: THREE.Camera, quality: 'l
         S.vz = dir.z * speed
     }
 
-    /** The free light, else the flash closest to done (null when every light is held). */
-    function freeLight(): (typeof lights)[number] | null {
-        let best: (typeof lights)[number] | null = null
-        let bestLeft = Infinity
-        for (const l of lights) {
-            if (l.held) continue
-            const left = l.life - l.age
-            if (left <= 0) return l
-            if (left < bestLeft) {
-                bestLeft = left
-                best = l
-            }
-        }
-        return best
-    }
-
     function flash(pos: V3, color: THREE.ColorRepresentation, intensity: number, seconds: number): void {
-        const best = freeLight()
+        const best = dfFlashSlot(lights)
         if (!best) return
         best.light.position.set(pos.x, pos.y, pos.z)
         best.light.distance = FLASH_REACH
@@ -1077,7 +1062,7 @@ export function createDfFx(scene: THREE.Scene, camera: THREE.Camera, quality: 'l
     }
 
     function holdLight(distance: number): THREE.PointLight | null {
-        const l = freeLight()
+        const l = dfHoldSlot(lights)
         if (!l) return null
         l.held = true
         l.age = 1
