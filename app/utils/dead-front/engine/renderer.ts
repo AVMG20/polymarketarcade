@@ -3,7 +3,7 @@ import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer
 import { Pass } from 'three/examples/jsm/postprocessing/Pass.js'
 import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js'
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js'
-import { dfNewPrGovernor, dfPixelRatioBounds, dfPrMemoryKey, dfPrStrained, dfStepPrGovernor, dfTierMemoryKey } from './resolution'
+import { dfNewPrGovernor, dfPixelRatioBounds, dfPrMemoryKey, dfPrStrained, dfStepPrGovernor, dfTierMemoryKey, dfTierTooHeavy } from './resolution'
 import { DfInkPass } from './toon-ink'
 
 // Renderer + post chain:
@@ -339,8 +339,29 @@ export function createDfRenderer(container: HTMLElement, opts: { quality?: 'auto
     /** A hitch would go unnoticed right now (see `setQuiet`). */
     let quiet = true
     let lastDpr = 0
-    /** The lowest ratio still ran long: the next match starts on the lighter tier. */
+    /** The lowest ratio still ran long (once a match): the GPU probe decides at the next lull. */
     let strained = false
+    let probeDue = false
+    const probePx = new Uint8Array(4)
+
+    /**
+     * GPU time per frame: a few frames back to back, then a pixel read waits for the GPU. No vsync
+     * in between, so a frame-rate cap doesn't count. A ~0.1 s hitch, once, between rounds.
+     */
+    function probeFrameMs(dt: number): number {
+        const gl = renderer.getContext()
+        const read = () => {
+            renderer.setRenderTarget(null)
+            gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, probePx)
+        }
+        composer.render(dt)
+        read()
+        const n = 4
+        const t = performance.now()
+        for (let i = 0; i < n; i++) composer.render(dt)
+        read()
+        return (performance.now() - t) / n
+    }
 
     /** The ratio this screen settled at last time (a match starts there, not at the ceiling). */
     function recall(): number | null {
@@ -440,11 +461,8 @@ export function createDfRenderer(container: HTMLElement, opts: { quality?: 'auto
                 remember()
             }
             if (auto && quality === 'high' && !strained && dfPrStrained(governor)) {
-                // the world's lights and shadows are built for the tier, so the switch waits for the
-                // next match; bloom can go now
                 strained = true
-                bloom.enabled = false
-                rememberLowTier(width, height)
+                probeDue = true
             }
             if (import.meta.dev) {
                 // dev: window.__dfGrade = { lowHealth, damage, down, flash } pins the grade inputs
@@ -457,6 +475,15 @@ export function createDfRenderer(container: HTMLElement, opts: { quality?: 'auto
             gu.uDown.value = g.down
             gu.uFlash.value = g.flash
             gu.uExposure.value = renderer.toneMappingExposure
+            if (probeDue && quiet) {
+                probeDue = false
+                if (dfTierTooHeavy(probeFrameMs(dt))) {
+                    // the world's lights and shadows are built for the tier, so the switch waits for
+                    // the next match; bloom can go now
+                    bloom.enabled = false
+                    rememberLowTier(width, height)
+                }
+            }
             composer.render(dt)
         },
         dispose() {
